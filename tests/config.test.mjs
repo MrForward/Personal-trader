@@ -1,0 +1,22 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { DEFAULT_SETTINGS, validateSettings } from '../src/config.mjs';
+
+test('settings version validated partial updates and preserve unrelated settings', () => {
+  const result = validateSettings({ version: 1, risk: { stopLossPct: 3 } });
+  assert.equal(result.version, 2); assert.equal(result.risk.stopLossPct, 3); assert.equal(result.risk.maxDailyLossPct, 3);
+  assert.deepEqual(result.model, DEFAULT_SETTINGS.model); assert.equal(DEFAULT_SETTINGS.risk.stopLossPct, 2);
+  assert.throws(() => validateSettings({ version: 1 }, result), /stale/);
+});
+test('unknown fields, null/nonfinite values and wrong nested shapes are rejected', () => {
+  for (const bad of [null, [], { surprise: 1 }, { risk: null }, { model: [] }, { simulation: 'wrong' }, { risk: { stopLossPct: null } },
+    { risk: { maxDailyLossPct: NaN } }, { simulation: { feeBps: Infinity } }, { strategy: { enabled: null } },
+    { model: { baseUrl: 'https://evil.example' } }, { risk: { unknown: 1 } }, { simulation: { unknown: 1 } },
+    { strategy: { arbitrary: true } }, { model: { provider: null } }, { risk: { stopLossPct: undefined } }]) assert.throws(() => validateSettings(bad));
+});
+test('allocation and independent loss limits have explicit finite bounds', () => {
+  assert.throws(() => validateSettings({ risk: { maxPositionPct: 70, maxExposurePct: 60 } }), /allocation/);
+  assert.throws(() => validateSettings({ risk: { maxDailyLossPct: 0 } }), /maxDailyLossPct/);
+  assert.throws(() => validateSettings({ risk: { maxDrawdownPct: 51 } }), /maxDrawdownPct/);
+  assert.equal(validateSettings({ risk: { maxDailyLossPct: 0.1 } }).risk.maxDailyLossPct, 0.1);
+});

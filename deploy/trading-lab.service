@@ -1,0 +1,39 @@
+[Unit]
+Description=Trading Lab private paper-trading dashboard
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=trading-lab
+Group=trading-lab
+WorkingDirectory=/opt/trading-lab
+Environment=NODE_ENV=production
+Environment=TRADING_LAB_HOST=127.0.0.1
+Environment=TRADING_LAB_PORT=3000
+Environment=TRADING_LAB_DB_PATH=/var/lib/trading-lab/trading-lab.sqlite
+EnvironmentFile=-/etc/trading-lab.env
+ExecStart=/usr/bin/node /opt/trading-lab/src/server.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+StateDirectory=trading-lab
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictSUIDSGID=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/trading-lab
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
