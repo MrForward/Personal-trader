@@ -400,3 +400,31 @@ test('closing the session also scores the expert book', async t => {
   clock.now = T('2026-10-14T10:00:31Z'); runner.poll(); await runner.idle();
   assert.deepEqual(scored, [[DAY, 0]]);
 });
+
+test('fix #1: an anomaly-scan storage read that throws is counted on the expert side; a fatal one halts only the expert book', async t => {
+  for (const [error, check] of [
+    [new Error('daily read failed'), run => assert.equal(run.runner.status().counters.expertRejectedRows, 3)],
+    [Object.assign(new Error('disk gone'), { code: 'PERSISTENCE_ERROR' }), run => assert.match(run.runner.status().expert.halted, /disk gone/)],
+  ]) {
+    let fatal;
+    const source = manual();
+    const run = setup(t, { source, expert: {}, onFatal: e => { fatal = e; } });
+    await run.runner.start();
+    run.expert.engine.store.dailyFor = () => { throw error; };
+    feedBars(source.handlers, OPEN, 4); await run.runner.idle();
+    assert.equal(fatal, undefined); assert.equal(run.runner.status().state, 'live');
+    assert.equal(run.runner.status().counters.rejectedRows, 0);
+    assert.equal(run.engine.state.cursor, run.engine.state.dataset.length - 1); assert.equal(run.engine.state.decisions.length, 6);
+    check(run);
+  }
+});
+
+test('fix #1: a daily-bar store read that throws during warmup is counted on the expert side, not as a rules warmup failure', async t => {
+  const expertStore = new Store(':memory:'); t.after(() => expertStore.close());
+  expertStore.dailyFor = () => { throw new Error('daily read failed'); };
+  const { runner, engine, expert } = setup(t, { source: manual(), expert: { store: expertStore } });
+  await runner.start(); await runner.idle();
+  assert.equal(runner.status().state, 'live'); assert.equal(engine.state.mode, 'prospective-paper');
+  assert.equal(runner.status().counters.warmupFailed, 0); assert.equal(runner.status().counters.rejectedRows, 0);
+  assert.equal(runner.status().counters.expertRejectedRows, 1); assert.equal(expert.engine.state.mode, 'prospective-paper');
+});

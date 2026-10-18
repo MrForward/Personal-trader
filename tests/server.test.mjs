@@ -172,3 +172,37 @@ test('expert enabled at startup wires the runner, guards research calls and mirr
   assert.equal(warned.status, 200); assert.match((await warned.json()).expertWarning, /busy/);
   assert.equal(app.engine.state.settings.expert.maxResearchPerSession, 4);
 });
+
+test('fix #2: every setting is mirrored to the expert book', async t => {
+  const { app, request } = await workspace(t);
+  const response = await request('/api/settings', { risk: { maxPositionPct: 20 } });
+  assert.equal(response.status, 200); assert.equal(response.body.expertWarning, undefined);
+  assert.equal(app.engine.state.settings.risk.maxPositionPct, 20); assert.equal(app.expertEngine.state.settings.risk.maxPositionPct, 20);
+});
+
+async function drifted(t, prepareExpert) {
+  const dir = mkdtempSync(join(tmpdir(), 'server-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, 'trading-lab.sqlite');
+  const rules = new Store(dbPath); new TradingEngine(rules).settings({ risk: { maxPositionPct: 20 }, simulation: { startingCapital: 12000 } }); rules.close();
+  const expert = new Store(join(dir, 'trading-lab-expert.sqlite')); await prepareExpert(new TradingEngine(expert)); expert.close();
+  const warnings = [], write = process.stderr.write;
+  process.stderr.write = chunk => { warnings.push(String(chunk)); return true; };
+  let app;
+  try { app = createApplication({ dbPath, port: 0, autoStepMs: 0 }); } finally { process.stderr.write = write; }
+  await app.listen(); t.after(() => app.close());
+  return { app, warnings };
+}
+
+test('fix #2: startup re-syncs drifted expert settings to the rules book', async t => {
+  const { app, warnings } = await drifted(t, engine => engine.settings({ risk: { maxPositionPct: 10 } }));
+  const { version: _a, ...rules } = app.engine.state.settings, { version: _b, ...expert } = app.expertEngine.state.settings;
+  assert.deepEqual(expert, rules); assert.equal(expert.risk.maxPositionPct, 20); assert.deepEqual(warnings, []);
+});
+
+test('fix #2: a startup re-sync the expert book refuses is a warning and the server still starts', async t => {
+  // The expert book has stepped, so its starting capital can no longer change.
+  const { app, warnings } = await drifted(t, engine => engine.step());
+  assert.equal(app.server.listening, true);
+  assert.equal(app.expertEngine.state.settings.simulation.startingCapital, 9000);
+  assert.match(warnings.join(''), /Warning: expert settings not synced.*starting capital/);
+});

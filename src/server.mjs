@@ -76,14 +76,19 @@ export function createApplication({
   });
   // Phase 1b expert book: its own store and engine; it trades only when expert.enabled is true at startup.
   const expertStore = new Store(expertDbPath);
-  const expertFresh = !expertStore.load();
   let expertEngine;
   const expertIntelligence = ({ symbol, asOf }) => intelligenceContext({ records: expertEngine?.state.intelligenceRecords ?? [], symbol, asOf });
   // Read through to the expert engine so settings changes reach the decider without a restart.
   const expertSettings = { get model() { return expertEngine.state.settings.model; }, get expert() { return expertEngine.state.settings.expert; } };
   const decider = makeDecider({ store: expertStore, settings: expertSettings, runner: modelRunner });
   expertEngine = new TradingEngine(expertStore, { decider, intelligenceProvider: expertIntelligence });
-  if (expertFresh) { const { version: _version, ...same } = engine.state.settings; expertEngine.settings(same); }
+  // Both books share every setting (spec §2); the expert engine keeps its own version counter.
+  const withoutVersion = ({ version: _version, ...rest }) => rest;
+  const canonical = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort()) : item);
+  if (canonical(withoutVersion(expertEngine.state.settings)) !== canonical(withoutVersion(engine.state.settings))) {
+    try { expertEngine.settings(withoutVersion(engine.state.settings)); }
+    catch (error) { process.stderr.write(`Warning: expert settings not synced with the rules book: ${publicError(error)}\n`); }
+  }
   const expertOn = engine.state.settings.expert.enabled === true;
   const research = async ({ symbol, now }) => {
     const settings = expertEngine.state.settings;
@@ -182,8 +187,8 @@ export function createApplication({
           } else engine.control(body.action);
         } else if (req.method === 'POST' && url.pathname === '/api/settings') {
           engine.settings(body);
-          // Expert and model settings are mirrored to the expert book, which keeps its own version counter.
-          const mirror = Object.fromEntries(['expert', 'model'].filter(key => Object.hasOwn(body, key)).map(key => [key, body[key]]));
+          // Every setting is mirrored to the expert book; its own guards (open positions, trades) can refuse, which is a warning.
+          const mirror = withoutVersion(body);
           if (Object.keys(mirror).length) {
             try { expertEngine.settings(mirror); }
             catch (error) { process.stderr.write(`Expert settings not mirrored: ${publicError(error)}\n`); return { ...snapshot(), expertWarning: publicError(error) }; }

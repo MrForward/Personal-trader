@@ -35,6 +35,11 @@ export class LiveRunner {
     this.expertHalted ??= redact(error.message); this.log(`Expert book halted: ${error.message}`);
     return true;
   }
+  // Every expert-side failure lands here, never in the rules book's counters.
+  expertError(error, what) {
+    if (this.expertFault(error)) return;
+    this.counters.expertRejectedRows++; this.log(`${what}: ${error.message}`);
+  }
   symbols() { return [...this.engine.state.settings.universe].sort(); }
   barMinutes() { return this.engine.state.settings.barMinutes; }
   async start() {
@@ -81,7 +86,7 @@ export class LiveRunner {
     const expert = this.expertEngine();
     if (!expert) return;
     try { this.load(expert, rows, symbols); } catch (error) { if (!this.expertFault(error)) this.log(`Expert warmup failed: ${error.message}`); }
-    await this.dailyWarmup(expert.store, symbols, endMs);
+    try { await this.dailyWarmup(expert.store, symbols, endMs); } catch (error) { this.expertError(error, 'Expert daily warmup failed'); }
   }
   load(engine, rows, symbols) {
     if (!this.isLive(engine)) {
@@ -140,18 +145,20 @@ export class LiveRunner {
       await engine.step({ runId: engine.state.runId, expectedCursor: engine.state.cursor, ...(blockEntries ? { blockEntries } : {}) });
     } catch (error) {
       if (this.expertFault(error)) return;
-      this.counters.expertRejectedRows++; this.log(`Expert bar ${row.timestamp} not applied: ${error.message}`);
+      this.expertError(error, `Expert bar ${row.timestamp} not applied`);
       // Keep the expert cursor on its own dataset so the next bar can step.
       try { engine.catchUp(); } catch (catchUpError) { if (!this.expertFault(catchUpError)) this.log(`Expert catch-up failed: ${catchUpError.message}`); }
       return;
     }
-    const daily = engine.store.dailyFor(this.day), history = engine.state.dataset.slice(0, -1);
-    for (const symbol of Object.keys(row.bars).sort()) {
-      if (this.anomalyCalls >= engine.state.settings.expert.maxResearchPerSession) break;
-      if (!isAnomaly(row.bars[symbol], history.map(prior => prior.bars[symbol]).filter(Boolean), daily[symbol] ?? [], this.barMinutes())) continue;
-      this.anomalyCalls++;
-      this.expertTask = this.expertTask.then(() => this.research([symbol]));
-    }
+    try {
+      const daily = engine.store.dailyFor(this.day), history = engine.state.dataset.slice(0, -1);
+      for (const symbol of Object.keys(row.bars).sort()) {
+        if (this.anomalyCalls >= engine.state.settings.expert.maxResearchPerSession) break;
+        if (!isAnomaly(row.bars[symbol], history.map(prior => prior.bars[symbol]).filter(Boolean), daily[symbol] ?? [], this.barMinutes())) continue;
+        this.anomalyCalls++;
+        this.expertTask = this.expertTask.then(() => this.research([symbol]));
+      }
+    } catch (error) { this.expertError(error, `Anomaly scan after ${row.timestamp} failed`); }
   }
   // Research at 08:30 IST, theses at 08:45 IST, each once per session day; a later start runs them at warmup, research first.
   scheduleExpert() {
