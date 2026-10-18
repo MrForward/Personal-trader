@@ -118,3 +118,27 @@ The dashboard has no authentication. Never open port 3000 in the firewall; use t
 Settings select `rules`, `openai`, or `anthropic` and a model ID. No model is selected implicitly for a paid provider. The server calls only the official fixed provider endpoints and enforces its review budget before calling the adapter. Model reviews cannot change order quantity, exposure limits or broker permissions.
 
 Request formats follow [OpenAI Responses structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs) and [Anthropic Messages structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs). Choose a model available to your account that supports the corresponding format. Unsupported models or malformed/refused/incomplete responses produce an error; they are not silently replaced by another provider or a rules result. Provider responses are checked locally as well.
+
+### Expert book: Claude subscription (Phase 1b)
+
+The expert paper book calls the Claude Code CLI in print mode (`claude -p`) under your Claude Max subscription. No API key is involved, and marginal model cost is ₹0 under the subscription. The design is in [the Phase 1b spec](../docs/superpowers/specs/2026-10-18-phase1b-expert-shadow-design.md).
+
+1. **On your Mac**, run `claude --version` and note the number, then run `claude setup-token` and sign in with your own Claude account. It prints a one-year OAuth token. Do not paste it into chat, Git or screenshots.
+2. **On the VPS**, add one line to `/etc/trading-lab.env` with `sudoedit`: `CLAUDE_CODE_OAUTH_TOKEN=<the token>`. Keep the file at mode 0600, root-owned.
+3. **No `ANTHROPIC_API_KEY` may exist** in `/etc/trading-lab.env`, the service user's environment or any profile file. In print mode a key silently takes precedence over the subscription token and would bill the API. Check with `sudo grep -r ANTHROPIC_API_KEY /etc/trading-lab.env /etc/environment` (no output is correct).
+4. **Install the CLI, pinned** to the version you tested on the Mac: `sudo npm i -g @anthropic-ai/claude-code@<version from claude --version on your Mac>`. Do not use `@latest`; upgrade only after testing the new version on the Mac.
+5. **Verify as the service user** without putting the token on a command line or in shell history. In a root shell, the token is loaded from the env file:
+
+   ```sh
+   sudo -i
+   set -a; . /etc/trading-lab.env; set +a
+   sudo -u trading-lab --preserve-env=CLAUDE_CODE_OAUTH_TOKEN claude -p --output-format json --tools "" 'Say ok'
+   exit
+   ```
+
+   The JSON result should contain `ok` and `"is_error":false`. Do not use `sudo env CLAUDE_CODE_OAUTH_TOKEN=...`; that records the token.
+6. In the dashboard, Configuration section 05, tick **Run the expert book**, and apply. It takes effect at the next service restart: `sudo systemctl restart trading-lab`. The Expert panel then shows **Running**.
+
+**The token is a one-year credential tied to your personal Claude account.** If the VPS may be compromised, revoke it at once in your claude.ai account settings (sign out of or revoke the Claude Code session there), then remove the line from `/etc/trading-lab.env` and restart the service. Revocation pauses the expert layer only; protective exits and the rules book never depend on it. Expect to repeat `claude setup-token` yearly.
+
+Before the first Phase 1b session, run one manual check: the hello call above works, a research pass writes records, a thesis appears in the Expert panel, and setting the daily call limit to 1 shows a suppression in the panel.

@@ -89,7 +89,7 @@ function applySnapshot(snapshot) {
   const changed = fingerprint !== state.fingerprint;
   state.snapshot = snapshot; state.fingerprint = fingerprint; $('connection-error').hidden = true;
   $('workspace-content').setAttribute('aria-busy', 'false');
-  if (changed) { renderOverview(); renderStrategies(); renderJournal(); renderConfiguration(); renderIntelligence(); }
+  if (changed) { renderOverview(); renderStrategies(); renderJournal(); renderConfiguration(); renderIntelligence(); renderExpert(); }
   updateControls();
   text('last-updated', `Updated ${new Intl.DateTimeFormat('en-IN', { timeStyle: 'medium' }).format(new Date())} · local simulator`);
 }
@@ -116,6 +116,38 @@ function updateControls(disconnected = false) {
     $('start-button').replaceChildren(icon(running ? 'pause' : 'play'), document.createTextNode(running ? 'Pause replay' : 'Run simulation'));
     $('start-button').setAttribute('aria-label', running ? 'Pause paper replay' : 'Run paper simulation');
   }
+}
+const istDay = value => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(value));
+function renderExpert() {
+  const e = state.snapshot.expert;
+  if (!e) { text('expert-status', 'The server did not report an expert book.'); return; }
+  const book = e.book, runner = e.runner, theses = e.theses ?? {};
+  const configured = state.snapshot.settings.expert?.enabled === true;
+  text('expert-status', e.enabled ? 'Running: paper-only, decided by Claude.' : `Not running. ${configured ? 'Enabled in settings; starts at the next service restart.' : 'Disabled in settings.'}`);
+  const day = book?.run?.timestamp ? istDay(book.run.timestamp) : null;
+  const today = (book?.decisions ?? []).filter(d => day && istDay(d.timestamp) === day);
+  const calls = today.filter(d => d.expert), suppressed = today.filter(d => d.outcome?.startsWith('Suppressed:'));
+  const cost = calls.reduce((total, d) => total + (d.expert.costUsd ?? 0), 0);
+  const parts = [`Today: ${calls.length} model calls, ${suppressed.length} suppressed, cost $${cost.toFixed(2)} (usage estimate; marginal cost is ₹0 under the subscription).`];
+  if (runner) parts.push(`Research ${runner.researchDone ? 'done' : 'not yet run'} today, theses ${runner.thesesDone ? 'written' : 'not yet written'}, ${runner.coverageMissing.length ? `no coverage for ${runner.coverageMissing.join(', ')}` : 'coverage complete'}${runner.halted ? `. Halted: ${runner.halted}` : ''}.`);
+  else parts.push('No live runner: research and theses run only during a live session.');
+  text('expert-summary', parts.join(' '));
+  $('expert-limit').hidden = !runner?.limitUntil;
+  if (runner?.limitUntil) text('expert-limit', `Claude usage limit reached; no model calls until ${date(runner.limitUntil, true)} IST.`);
+  const lastTrigger = symbol => (book?.decisions ?? []).find(d => d.symbol === symbol && d.trigger)?.trigger ?? '—'; // decisions are newest first
+  const symbols = [...new Set([...(book?.assets ?? []).map(a => a.symbol), ...Object.keys(theses)])];
+  replace('expert-theses-body', symbols.length ? symbols.map(symbol => {
+    const t = theses[symbol], row = node('tr');
+    row.append(node('td', 'asset-name', symbol), node('td', '', t ? `${t.stance}${t.invalid ? ' (invalidated)' : ''}` : 'watch'), node('td', '', t ? date(t.expiresAt, true) : '—'),
+      node('td', 'number', t?.invalidation ? `Below ${numeric(t.invalidation.priceBelow)}${t.invalidation.note ? `: ${t.invalidation.note}` : ''}` : '—'), node('td', '', lastTrigger(symbol)));
+    return row;
+  }) : [emptyRow(5, 'No universe symbols yet.')]);
+  const positions = book?.positions ?? [];
+  replace('expert-positions-body', positions.length ? positions.map(p => {
+    const row = node('tr'), pnl = node('td', 'number', money(p.unrealizedPnl)); changeColor(pnl, p.unrealizedPnl);
+    row.append(node('td', 'asset-name', p.symbol), node('td', 'number', numeric(p.quantity)), pairedCell(money(p.entryPrice), money(p.markPrice), 'number'), node('td', 'number', money(p.stopPrice)), pnl);
+    return row;
+  }) : [emptyRow(5, 'No open expert positions.')]);
 }
 function strategyName(id) { return state.snapshot?.strategies?.find(item => item.id === id)?.name || ({ auto: 'Automatic', none: 'No candidate', momentum: 'Trend follow', mean_reversion: 'Range reversion' }[id]) || id || '—'; }
 function meter(id, current, limit) {
@@ -286,6 +318,9 @@ function renderConfiguration() {
     for (const [name, value] of Object.entries(settings.risk)) if (formValue(name)) formValue(name).value = value;
     for (const [name, value] of Object.entries(settings.simulation)) if (formValue(name)) formValue(name).value = value;
     formValue('universe').value = settings.universe.join(', '); formValue('barMinutes').value = settings.barMinutes;
+    const x = settings.expert;
+    formValue('expertEnabled').checked = x.enabled; formValue('thesisModel').value = x.thesisModel; formValue('decisionModel').value = x.decisionModel; formValue('researchModel').value = x.researchModel;
+    formValue('maxResearchPerSession').value = x.maxResearchPerSession; formValue('allowedDomains').value = x.allowedDomains.join('\n');
     state.formVersion = settings.version;
   }
   const started = s.run.cursor > 29 || s.trades.length > 0;
@@ -362,14 +397,24 @@ function openStop(id) {
 }
 async function renderReports() {
   let reports;
-  try { reports = (await api('/api/reports')).map(row => row.rules); } catch (error) { replace('reports-body', [node('tr', '', node('td', 'empty-cell', error.message))]); return; }
+  try { reports = await api('/api/reports'); } catch (error) { replace('reports-body', [node('tr', '', node('td', 'empty-cell', error.message))]); return; }
   text('reports-count', `${reports.length} days`);
-  if (!reports.length) { replace('reports-body', [(() => { const row = node('tr', ''); const cell = node('td', 'empty-cell', 'No daily report yet. One is written after each live session closes.'); cell.colSpan = 7; row.append(cell); return row; })()]); return; }
-  replace('reports-body', [...reports].reverse().map(r => {
+  // Expert columns appear only once an expert report exists, so the Phase 1 table is unchanged until then.
+  const two = reports.some(row => row.expert);
+  const head = document.querySelector('#reports-body').closest('table').querySelector('thead tr');
+  head.querySelectorAll('[data-expert-column]').forEach(cell => cell.remove());
+  if (two) for (const label of ['Expert net', 'Buy-and-hold net', 'Model cost (USD, est.)']) head.append(node('th', '', label, { scope: 'col', 'data-expert-column': '' }));
+  const columns = two ? 10 : 7;
+  if (!reports.length) { replace('reports-body', [emptyRow(7, 'No daily report yet. One is written after each live session closes.')]); $('reports-expert-note').hidden = true; return; }
+  replace('reports-body', [...reports].reverse().map(({ rules: r, expert: e }) => {
     const row = node('tr', '');
     for (const value of [r.day, money(r.equity), money(r.benchmarkEquity), money(r.fixedCostsToDate), money(r.netAfterFixedCosts), String(r.tradesToday.length), r.dataQuality?.flagged ? 'Flagged' : 'OK']) row.append(node('td', '', value));
+    if (two) for (const value of [e ? money(e.netAfterFixedCosts) : '—', e ? money(r.netAfterFixedCosts + r.benchmarkEquity - r.equity) : '—', Number.isFinite(e?.expert?.costUsd) ? `$${e.expert.costUsd.toFixed(2)}` : '—']) row.append(node('td', '', value));
     return row;
   }));
+  const cost = reports.reduce((total, row) => total + (row.expert?.expert?.costUsd ?? 0), 0);
+  text('reports-expert-note', `Expert book: model cost across these days is about $${cost.toFixed(2)} (estimate). Under the Claude subscription the marginal cost is ₹0; the figure shows usage, not spend.`);
+  $('reports-expert-note').hidden = !two;
 }
 function navigate() {
   const requested = location.hash.slice(1), view = Object.hasOwn(titles, requested) ? requested : 'overview';
@@ -407,8 +452,12 @@ $('settings-form').addEventListener('submit', async event => {
   if (risk.maxPositionPct > risk.maxExposurePct) { announce('Maximum position cannot exceed maximum exposure.', true); formValue('maxPositionPct').focus(); return; }
   const provider = formValue('provider').value;
   const payload = { model: { provider, model: provider === 'rules' ? '' : formValue('model').value.trim(), maxOutputTokens: Number(formValue('maxOutputTokens').value), timeoutMs: Number(formValue('timeoutMs').value), dailyCallLimit: Number(formValue('dailyCallLimit').value) }, strategy: { mode, enabled }, risk, simulation: { startingCapital: $('capital-input').disabled ? state.snapshot.settings.simulation.startingCapital : Number(formValue('startingCapital').value), slippageBps: Number(formValue('slippageBps').value), costSchedule: formValue('costSchedule').value, fixedCostsPerMonthInr: Number(formValue('fixedCostsPerMonthInr').value), spendCapPerMonthInr: Number(formValue('spendCapPerMonthInr').value) },
-    universe: formValue('universe').value.split(',').map(symbol => symbol.trim().toUpperCase()).filter(Boolean), barMinutes: Number(formValue('barMinutes').value) };
-  try { const result = await mutate('/api/settings', payload, 'Configuration applied. Open-position stops and targets are retained.'); if (result) { state.formDirty = false; renderConfiguration(); updateControls(); } } catch {}
+    universe: formValue('universe').value.split(',').map(symbol => symbol.trim().toUpperCase()).filter(Boolean), barMinutes: Number(formValue('barMinutes').value),
+    expert: { enabled: formValue('expertEnabled').checked, thesisModel: formValue('thesisModel').value.trim(), decisionModel: formValue('decisionModel').value.trim(), researchModel: formValue('researchModel').value.trim(),
+      maxResearchPerSession: Number(formValue('maxResearchPerSession').value), allowedDomains: formValue('allowedDomains').value.split(/[\s,]+/).map(domain => domain.toLowerCase()).filter(Boolean) } };
+  try { const result = await mutate('/api/settings', payload, 'Configuration applied. Open-position stops and targets are retained.');
+    if (result?.expertWarning) announce(`Applied to the rules book. Expert book not updated: ${result.expertWarning}`, true);
+    if (result) { state.formDirty = false; renderConfiguration(); updateControls(); } } catch {}
 });
 $('cancel-stop').addEventListener('click', () => $('stop-dialog').close());
 $('stop-form').addEventListener('submit', async event => {

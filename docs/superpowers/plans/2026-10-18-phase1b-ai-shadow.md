@@ -1,3 +1,5 @@
+> **Superseded on 18 October 2026** by [the expert shadow design](../specs/2026-10-18-phase1b-expert-shadow-design.md); not to be implemented.
+
 # Phase 1b AI Shadow Mode Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

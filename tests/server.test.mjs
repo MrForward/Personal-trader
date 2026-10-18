@@ -211,3 +211,17 @@ test('fix #2: a startup re-sync the expert book refuses is a warning and the ser
   assert.equal(app.expertEngine.state.settings.simulation.startingCapital, 9000);
   assert.match(warnings.join(''), /Warning: expert settings not synced.*starting capital/);
 });
+
+test('POST /api/settings accepts expert settings; the page ships the Expert panel and settings fields', async t => {
+  const { base, request } = await workspace(t);
+  const saved = await request('/api/settings', { expert: { enabled: true, maxResearchPerSession: 2, allowedDomains: ['nseindia.com'] } });
+  assert.equal(saved.status, 200); assert.equal(saved.body.expertWarning, undefined);
+  const state = await (await fetch(base + '/api/state')).json();
+  assert.equal(state.settings.expert.enabled, true); assert.equal(state.settings.expert.maxResearchPerSession, 2);
+  assert.deepEqual(state.settings.expert.allowedDomains, ['nseindia.com']);
+  // The running flag follows the startup value, so the panel must say a restart is needed.
+  assert.equal(state.expert.enabled, false);
+  const html = await (await fetch(base + '/')).text(), script = await (await fetch(base + '/app.js')).text();
+  for (const id of ['expert-panel', 'expert-enabled', 'expert-thesis-model', 'expert-decision-model', 'expert-research-model', 'expert-max-research', 'expert-domains']) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /next service restart/); assert.match(script, /function renderExpert/);
+});

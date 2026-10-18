@@ -32,6 +32,21 @@ Running on the owner's Mac while the AWS account finishes activating:
 - [ ] First live session (Monday 19 Oct): header switches to LIVE PAPER, ticks arrive from 09:15, first decision around 09:30, daily report after 15:30.
 - [ ] Deploy to AWS Lightsail Mumbai (waiting on account activation; $100 sign-up + $20 budget credits on the account).
 
+## Phase 1b build — 18 October 2026
+
+Phase 1b is the expert shadow: a second paper book decided by Claude through the owner's Claude Max subscription, on branch `phase1b-expert-shadow`. Design: [expert shadow spec](superpowers/specs/2026-10-18-phase1b-expert-shadow-design.md); plan: [expert shadow plan](superpowers/plans/2026-10-18-phase1b-expert-shadow.md). The earlier [AI shadow design](superpowers/specs/2026-10-18-phase1b-ai-shadow-design.md) is superseded and not to be built.
+
+- Task 1, `src/models.mjs`: `claude-code` provider that runs headless `claude -p` with a schema, a budget and a limit-reset parser.
+- Task 2, settings, store, context: `expert` settings, expert tables in the store, daily and index bars, the deterministic context pack.
+- Task 3, `src/research.mjs`: research worker that writes allow-listed intelligence records.
+- Task 4, engine: decider option with tighten-only expert stops; the user's own stop path is unchanged.
+- Task 5, `src/expert.mjs`: thesis and decision calls with triggers and replay keys; suppressions are recorded.
+- Task 6, `src/live.mjs`, `src/server.mjs`: the expert engine runs beside the rules engine with scheduled research and theses; its failures never reach the rules book; both books share every setting.
+- Task 7, `src/expert.mjs`: nightly scoring, trade-driven reviews with memory, two-book daily reports and the scorecard.
+- Task 8, dashboard and docs: Expert panel, expert settings (section 05), two-book Reports columns, deploy steps for the setup-token and a pinned CLI, GOAL.md rows.
+
+**Verification:** `npm test` and `npm run typecheck` pass; the Expert panel, settings save and restart note were checked in a browser against the synthetic demo (expert off, then enabled and restarted). The populated panel and two-book Reports table were checked in the browser with mocked API responses. **Not verified:** any real `claude -p` call, setup-token login, research pass, live thesis or deploy on the VPS; that is the manual check at the end of the Model access section in `deploy/README.md`. The CLI version to pin is not yet recorded; the owner takes it from `claude --version` on the Mac.
+
 ## Earlier checkpoint — 16 October 2026
 
 The local paper dashboard now has a Node server, browser controls, persistent SQLite ledger, configurable strategies/risk settings, model profiles with paid calls disabled by default, replay/import/export, and captured-intelligence display/import. The optional eve diagnostic agent has a single read-only snapshot tool; shell and file defaults are disabled. The dashboard is loopback-only. No live feed, news API, TradingView account, Zerodha account, paid model call, subscription, VM or real order is connected.
