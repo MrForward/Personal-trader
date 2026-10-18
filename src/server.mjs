@@ -4,7 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
 import { Store } from './store.mjs';
 import { TradingEngine } from './engine.mjs';
-import { reviewMarket } from './models.mjs';
+import { reviewMarket, runClaudeCode } from './models.mjs';
+import { makeDecider, runTheses } from './expert.mjs';
+import { researchMarket, researchSymbol } from './research.mjs';
 import { intelligenceContext, makeDemoIntelligence, validateIntelligence } from './intelligence.mjs';
 import { redact } from './secrets.mjs';
 import { KiteSession } from './kite.mjs';
@@ -46,6 +48,7 @@ export function createApplication({
   allowPaidModelCalls = false, reviewer = reviewMarket,
   kite = { apiKey: process.env.KITE_API_KEY, apiSecret: process.env.KITE_API_SECRET },
   captureDir, makeClient, makeTicker, liveOptions = {},
+  expertDbPath = dbPath === ':memory:' ? ':memory:' : dbPath.replace(/(\.sqlite)?$/, '-expert$1'), modelRunner = runClaudeCode,
 } = {}) {
   if (!loopbackNames.has(host)) throw new Error('The personal dashboard must bind to loopback. Use an SSH tunnel for remote access.');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid listening port.');
@@ -71,6 +74,28 @@ export function createApplication({
       return reviewer(input);
     },
   });
+  // Phase 1b expert book: its own store and engine; it trades only when expert.enabled is true at startup.
+  const expertStore = new Store(expertDbPath);
+  const expertFresh = !expertStore.load();
+  let expertEngine;
+  const expertIntelligence = ({ symbol, asOf }) => intelligenceContext({ records: expertEngine?.state.intelligenceRecords ?? [], symbol, asOf });
+  // Read through to the expert engine so settings changes reach the decider without a restart.
+  const expertSettings = { get model() { return expertEngine.state.settings.model; }, get expert() { return expertEngine.state.settings.expert; } };
+  const decider = makeDecider({ store: expertStore, settings: expertSettings, runner: modelRunner });
+  expertEngine = new TradingEngine(expertStore, { decider, intelligenceProvider: expertIntelligence });
+  if (expertFresh) { const { version: _version, ...same } = engine.state.settings; expertEngine.settings(same); }
+  const expertOn = engine.state.settings.expert.enabled === true;
+  const research = async ({ symbol, now }) => {
+    const settings = expertEngine.state.settings;
+    const id = expertStore.reserveCall({ provider: 'claude-code', model: settings.expert.researchModel, dailyCallLimit: settings.model.dailyCallLimit });
+    let out;
+    try { out = symbol === 'MARKET' ? await researchMarket({ now, settings, runner: modelRunner }) : await researchSymbol({ symbol, companyName: symbol, now, settings, runner: modelRunner }); }
+    catch (error) { expertStore.finishCall(id, 'failed'); throw error; }
+    expertStore.finishCall(id, 'completed', out.usage);
+    return out;
+  };
+  const theses = ({ symbols, day, asOf, state }) => runTheses({ store: expertStore, settings: expertEngine.state.settings, symbols, day, asOf, state, runner: modelRunner,
+    intelligenceFor: (symbol, at) => expertIntelligence({ symbol, asOf: at }) });
   // One writer: requests and replay ticks cannot race settings, state or the cursor.
   let queue = Promise.resolve();
   const serial = operation => {
@@ -83,7 +108,9 @@ export function createApplication({
     ...(makeClient ? { makeClient } : {}), ...(makeTicker ? { makeTicker } : {}) }) : null;
   const runner = kiteSession ? new LiveRunner({ engine, session: kiteSession, run: serial,
     captureDir: captureDir ?? (dbPath === ':memory:' ? resolve(projectRoot, 'data/ticks') : resolve(dirname(dbPath), 'ticks')),
-    onFatal: error => { process.stderr.write(`Live runner stopped: ${redact(error.message)}\n`); process.exitCode = 1; void app?.close(); }, ...liveOptions }) : null;
+    onFatal: error => { process.stderr.write(`Live runner stopped: ${redact(error.message)}\n`); process.exitCode = 1; void app?.close(); },
+    // shortcut: scoring is the expert book's daily report until Task 7 adds the scorecard.
+    expert: expertOn ? { engine: expertEngine, decider, research, theses, scoring: (day, dataQuality) => expertEngine.dailyReport(day, dataQuality) } : null, ...liveOptions }) : null;
   const kiteStatus = () => kiteSession ? { configured: true, session: kiteSession.status(), runner: runner.status() } : { configured: false };
   const snapshot = () => {
     const value = engine.snapshot();
@@ -93,6 +120,8 @@ export function createApplication({
       mode: 'captured fixtures / imported evidence', networkConnected: false,
       contexts: value.market.map(asset => intelligenceProvider({ symbol: asset.symbol, asOf: value.run.timestamp })),
     };
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    value.expert = { enabled: expertOn, book: expertEngine.snapshot(), theses: expertStore.thesesFor(today), runner: runner?.status().expert ?? null };
     return value;
   };
   let closing = false;
@@ -151,7 +180,15 @@ export function createApplication({
             if (!Number.isInteger(body.expectedCursor) || typeof body.runId !== 'string') throw new Error('Step requires the expectedCursor and runId from the latest state.');
             await engine.step({ expectedCursor: body.expectedCursor, runId: body.runId });
           } else engine.control(body.action);
-        } else if (req.method === 'POST' && url.pathname === '/api/settings') engine.settings(body);
+        } else if (req.method === 'POST' && url.pathname === '/api/settings') {
+          engine.settings(body);
+          // Expert and model settings are mirrored to the expert book, which keeps its own version counter.
+          const mirror = Object.fromEntries(['expert', 'model'].filter(key => Object.hasOwn(body, key)).map(key => [key, body[key]]));
+          if (Object.keys(mirror).length) {
+            try { expertEngine.settings(mirror); }
+            catch (error) { process.stderr.write(`Expert settings not mirrored: ${publicError(error)}\n`); return { ...snapshot(), expertWarning: publicError(error) }; }
+          }
+        }
         else if (req.method === 'POST' && url.pathname === '/api/import') engine.importDataset(body);
         else if (req.method === 'POST' && url.pathname === '/api/intelligence/import') engine.setIntelligence(validateIntelligence(body.records));
         else if (req.method === 'POST' && url.pathname === '/api/review') return engine.review(body.symbol);
@@ -185,7 +222,7 @@ export function createApplication({
   }, autoStepMs) : null;
   interval?.unref();
   app = {
-    server, engine, store, runner, kiteSession,
+    server, engine, store, runner, kiteSession, expertEngine, expertStore,
     listen: () => new Promise((resolveListen, reject) => {
       server.once('error', reject);
       server.listen(port, host, () => {
@@ -201,7 +238,7 @@ export function createApplication({
       if (interval) clearInterval(interval);
       if (server.listening) await new Promise(resolveClose => server.close(resolveClose));
       await queue;
-      store.close();
+      store.close(); expertStore.close();
     },
   };
   return app;

@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createApplication } from '../src/server.mjs';
+import { Store } from '../src/store.mjs';
+import { TradingEngine } from '../src/engine.mjs';
 import { ACCESS_TOKEN, fakeClient, fakeTicker } from './kite-fakes.mjs';
 
 async function workspace(t) {
@@ -129,4 +134,41 @@ test('reports route returns saved daily reports', async t => {
   app.engine.dailyReport('2026-10-14', { ticks: 0, flagged: false });
   const reports = await (await fetch(base + '/api/reports')).json();
   assert.equal(reports.length, 1); assert.equal(reports[0].day, '2026-10-14');
+});
+
+test('/api/state has expert.enabled false by default and no expert engine calls', async t => {
+  const { app, base } = await workspace(t);
+  const state = await (await fetch(base + '/api/state')).json();
+  assert.equal(state.expert.enabled, false); assert.equal(state.expert.runner, null);
+  assert.equal(state.expert.book.mode, 'paper'); assert.equal(state.expert.book.dataset, undefined); assert.deepEqual(state.expert.theses, {});
+  assert.equal(app.expertStore.callCount(), 0);
+  const kite = await kiteWorkspace(t);
+  assert.equal(kite.app.runner.expert, null);
+});
+
+test('expert enabled at startup wires the runner, guards research calls and mirrors expert settings', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'server-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, 'trading-lab.sqlite');
+  const seed = new Store(dbPath); new TradingEngine(seed).settings({ expert: { enabled: true } }); seed.close();
+  let fail = false;
+  const modelRunner = async () => { if (fail) throw new Error('claude -p failed'); return { value: { records: [], coverageNote: 'none' }, usage: { inputTokens: 1, outputTokens: 2 }, costUsd: 0 }; };
+  const app = createApplication({ dbPath, port: 0, autoStepMs: 0, kite: { apiKey: 'key', apiSecret: 'kite-api-secret' }, modelRunner,
+    makeClient: () => fakeClient(), makeTicker: () => fakeTicker(), liveOptions: { intervalMs: 0, calendar: () => null } });
+  const address = await app.listen(); t.after(() => app.close());
+  const base = `http://127.0.0.1:${address.port}`;
+  assert.ok(app.runner.expert); assert.equal(app.expertEngine.state.settings.expert.enabled, true);
+  assert.equal((await app.runner.expert.research({ symbol: 'MARKET', now: '2026-10-14T03:00:00.000Z' })).coverageNote, 'none');
+  fail = true;
+  await assert.rejects(app.runner.expert.research({ symbol: 'INFY', now: '2026-10-14T03:00:00.000Z' }), /claude -p failed/);
+  const calls = app.expertStore.audit().filter(row => row.kind === 'model-call-finished').map(row => row.payload.status);
+  assert.deepEqual(calls, ['completed', 'failed']); assert.equal(app.store.callCount(), 0);
+  const response = await fetch(base + '/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expert: { maxResearchPerSession: 3 } }) });
+  const body = await response.json();
+  assert.equal(response.status, 200); assert.equal(body.expertWarning, undefined); assert.equal(body.expert.enabled, true);
+  assert.equal(app.engine.state.settings.expert.maxResearchPerSession, 3); assert.equal(app.expertEngine.state.settings.expert.maxResearchPerSession, 3);
+  // A mirror failure is a warning; the rules book's update still stands.
+  app.expertEngine.settings = () => { throw new Error('Engine is busy'); };
+  const warned = await fetch(base + '/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expert: { maxResearchPerSession: 4 } }) });
+  assert.equal(warned.status, 200); assert.match((await warned.json()).expertWarning, /busy/);
+  assert.equal(app.engine.state.settings.expert.maxResearchPerSession, 4);
 });

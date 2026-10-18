@@ -134,6 +134,9 @@ export class Store {
   decisionTriggers(symbol, from, before) {
     return this.db.prepare(`SELECT DISTINCT trigger FROM model_outputs WHERE ${DECISIONS} AND asOf>=? AND asOf<? ORDER BY trigger`).all(symbol, from, before).map(row => row.trigger);
   }
+  // Pre-session research is once per session day; the marker lives in the audit log so a restart sees it.
+  researchDone(day) { return Boolean(this.db.prepare("SELECT 1 FROM audit WHERE kind='research-pass' AND json_extract(payload,'$.day')=?").get(day)); }
+  markResearchDone(day) { this.append('research-pass', { day }); }
   clearKiteSession() { this.db.prepare('DELETE FROM kite_session WHERE id=1').run(); }
   audit() { return this.db.prepare('SELECT * FROM audit ORDER BY id').all().map(row => ({ ...row, payload: JSON.parse(row.payload) })); }
   archiveCount() { return this.db.prepare('SELECT COUNT(*) AS count FROM archived_runs').get().count; }

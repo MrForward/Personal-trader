@@ -3,22 +3,37 @@ import { join } from 'node:path';
 import { BarBuilder } from './bars.mjs';
 import { sessionFor } from './calendar.mjs';
 import { redact } from './secrets.mjs';
+import { SECTOR_INDEX } from './expert.mjs';
+import { isAnomaly } from './research.mjs';
+import { validateIntelligence } from './intelligence.mjs';
 
 const WARMUP_BARS = 40, SKEW_MS = 5_000, SKEW_RUN = 3, CLEAN_BARS = 2, FLUSH_GRACE_MS = 30_000, MAX_BACKOFF_S = 300;
 const fatal = error => ['PERSISTENCE_ERROR', 'STALE_STATE'].includes(error?.code);
+const RESEARCH_AT = 8 * 60 + 30, THESES_AT = 8 * 60 + 45, DAILY_BARS = 60;
+const istMinutes = ms => Math.floor((ms + 330 * 60_000) / 60_000) % 1440;
 
 // Feeds live ticks into the engine one closed bar at a time. Every tick is captured before use so a day replays exactly.
+// With `expert` (Phase 1b), a second engine gets the same bars after the rules engine; its failures never reach the rules book.
 export class LiveRunner {
   constructor({ engine, session, captureDir, source = session.ticker(), calendar = sessionFor, now = Date.now, run = fn => fn(),
-    onFatal = () => {}, intervalMs = 10_000, log = message => process.stderr.write(`${redact(message)}\n`) }) {
-    Object.assign(this, { engine, session, captureDir, source, calendar, now, run, onFatal, intervalMs, log });
-    this.state = 'idle'; this.pending = Promise.resolve(); this.timers = [];
+    onFatal = () => {}, intervalMs = 10_000, log = message => process.stderr.write(`${redact(message)}\n`), expert = null }) {
+    Object.assign(this, { engine, session, captureDir, source, calendar, now, run, onFatal, intervalMs, log, expert });
+    this.state = 'idle'; this.pending = Promise.resolve(); this.timers = []; this.expertTask = Promise.resolve(); this.expertHalted = null;
     this.resetDay(null);
   }
   resetDay(day) {
     this.day = day; this.builder = null; this.barsToday = 0; this.cleanBarsSinceGap = 0; this.lastTickAt = null;
     this.skewRun = 0; this.unskewRun = 0; this.skewed = false; this.gapBarEnd = null; this.reconnects = 0; this.nextAttemptAt = null; this.partial = false;
-    this.counters = { ticks: 0, badTicks: 0, rejectedRows: 0, warmupFailed: 0, disconnects: 0 };
+    this.counters = { ticks: 0, badTicks: 0, rejectedRows: 0, warmupFailed: 0, disconnects: 0, ...(this.expert && { expertRejectedRows: 0 }) };
+    // shortcut: anomaly calls are counted in memory, so a restart mid-session resets the cap; dailyCallLimit still bounds spend.
+    this.researchStarted = false; this.thesesStarted = false; this.researchDone = false; this.thesesDone = false; this.anomalyCalls = 0; this.coverageMissing = new Set();
+  }
+  expertEngine() { return this.expert && !this.expertHalted ? this.expert.engine : null; }
+  // True when the error was a storage fault: the expert book stops, the rules book carries on.
+  expertFault(error) {
+    if (!fatal(error)) return false;
+    this.expertHalted ??= redact(error.message); this.log(`Expert book halted: ${error.message}`);
+    return true;
   }
   symbols() { return [...this.engine.state.settings.universe].sort(); }
   barMinutes() { return this.engine.state.settings.barMinutes; }
@@ -49,10 +64,11 @@ export class LiveRunner {
     for (const symbol of this.symbols()) if (last.bars[symbol]) this.builder.seed(symbol, last.bars[symbol].close);
     this.state = 'live';
     this.connect();
+    this.scheduleExpert();
     return this.status();
   }
-  isLive() {
-    const s = this.engine.state;
+  isLive(engine = this.engine) {
+    const s = engine.state;
     return s.mode === 'prospective-paper' && s.liveBarMinutes === this.barMinutes() && JSON.stringify(s.assets.map(a => a.symbol).sort()) === JSON.stringify(this.symbols());
   }
   async warmup() {
@@ -61,12 +77,28 @@ export class LiveRunner {
     const stamps = bySymbol.map(bars => new Map(bars.map(bar => [bar.timestamp, bar])));
     const rows = [...stamps[0].keys()].filter(stamp => stamps.every(map => map.has(stamp))).sort()
       .map(timestamp => ({ timestamp, bars: Object.fromEntries(symbols.map((symbol, i) => { const { timestamp: _t, ...bar } = stamps[i].get(timestamp); return [symbol, bar]; })) }));
-    if (!this.isLive()) {
-      return this.engine.beginLive({ rows, assets: symbols.map(symbol => ({ symbol, name: symbol, sector: 'NSE' })), source: 'Kite live NSE (prospective paper)' });
+    this.load(this.engine, rows, symbols);
+    const expert = this.expertEngine();
+    if (!expert) return;
+    try { this.load(expert, rows, symbols); } catch (error) { if (!this.expertFault(error)) this.log(`Expert warmup failed: ${error.message}`); }
+    await this.dailyWarmup(expert.store, symbols, endMs);
+  }
+  load(engine, rows, symbols) {
+    if (!this.isLive(engine)) {
+      return engine.beginLive({ rows, assets: symbols.map(symbol => ({ symbol, name: symbol, sector: 'NSE' })), source: 'Kite live NSE (prospective paper)' });
     }
-    const lastMs = Date.parse(this.engine.state.dataset.at(-1).timestamp);
-    for (const row of rows) if (Date.parse(row.timestamp) > lastMs) this.engine.appendBar({ ...row, source: 'historical' });
-    this.engine.catchUp();
+    const lastMs = Date.parse(engine.state.dataset.at(-1).timestamp);
+    for (const row of rows) if (Date.parse(row.timestamp) > lastMs) engine.appendBar({ ...row, source: 'historical' });
+    engine.catchUp();
+  }
+  // Daily bars for the expert's context pack: each symbol, NIFTY 50 and each mapped sector index, fetched once per session day.
+  async dailyWarmup(store, symbols, endMs) {
+    const have = store.dailyFor(this.day);
+    const names = [...new Set([...symbols, 'NIFTY 50', ...symbols.map(symbol => SECTOR_INDEX[symbol]).filter(Boolean)])].filter(name => !have[name]);
+    for (const name of names) {
+      try { store.saveDaily(this.day, name, await this.session.historicalBars({ symbol: name, barMinutes: 'day', count: DAILY_BARS, endMs })); }
+      catch (error) { this.log(`Daily bars for ${name} unavailable: ${error.message}`); }
+    }
   }
   connect() {
     this.source.start({ onTick: tick => this.onTick(tick), onClose: reason => this.onClose(reason), onError: error => this.log(`Feed error: ${error?.message ?? error}`) });
@@ -88,16 +120,91 @@ export class LiveRunner {
     this.cleanBarsSinceGap = row.source === 'ticks' ? this.cleanBarsSinceGap + 1 : 0;
     this.barsToday++;
     this.pending = this.pending.then(() => this.run(async () => {
-      this.engine.appendBar(row);
-      await this.engine.step({ runId: this.engine.state.runId, expectedCursor: this.engine.state.cursor, ...(blockEntries ? { blockEntries } : {}) });
+      let failure = null;
+      try {
+        this.engine.appendBar(row);
+        await this.engine.step({ runId: this.engine.state.runId, expectedCursor: this.engine.state.cursor, ...(blockEntries ? { blockEntries } : {}) });
+      } catch (error) { failure = error; }
+      if (!fatal(failure)) await this.expertBar(row, blockEntries);
+      if (failure) throw failure;
     })).catch(error => {
       if (fatal(error)) return this.die(error);
       this.counters.rejectedRows++; this.log(`Bar ${row.timestamp} not applied: ${error.message}`);
     });
   }
+  async expertBar(row, blockEntries) {
+    const engine = this.expertEngine();
+    if (!engine) return;
+    try {
+      engine.appendBar(row);
+      await engine.step({ runId: engine.state.runId, expectedCursor: engine.state.cursor, ...(blockEntries ? { blockEntries } : {}) });
+    } catch (error) {
+      if (this.expertFault(error)) return;
+      this.counters.expertRejectedRows++; this.log(`Expert bar ${row.timestamp} not applied: ${error.message}`);
+      // Keep the expert cursor on its own dataset so the next bar can step.
+      try { engine.catchUp(); } catch (catchUpError) { if (!this.expertFault(catchUpError)) this.log(`Expert catch-up failed: ${catchUpError.message}`); }
+      return;
+    }
+    const daily = engine.store.dailyFor(this.day), history = engine.state.dataset.slice(0, -1);
+    for (const symbol of Object.keys(row.bars).sort()) {
+      if (this.anomalyCalls >= engine.state.settings.expert.maxResearchPerSession) break;
+      if (!isAnomaly(row.bars[symbol], history.map(prior => prior.bars[symbol]).filter(Boolean), daily[symbol] ?? [], this.barMinutes())) continue;
+      this.anomalyCalls++;
+      this.expertTask = this.expertTask.then(() => this.research([symbol]));
+    }
+  }
+  // Research at 08:30 IST, theses at 08:45 IST, each once per session day; a later start runs them at warmup, research first.
+  scheduleExpert() {
+    if (!this.expertEngine() || !this.builder) return;
+    const minutes = istMinutes(this.now());
+    if (!this.researchStarted && minutes >= RESEARCH_AT) { this.researchStarted = true; this.expertTask = this.expertTask.then(() => this.researchPass()); }
+    if (!this.thesesStarted && minutes >= THESES_AT) { this.thesesStarted = true; this.expertTask = this.expertTask.then(() => this.thesesPass()); }
+  }
+  async researchPass() {
+    const engine = this.expertEngine(), day = this.day;
+    if (!engine) return;
+    try {
+      if (!engine.store.researchDone(day)) { await this.research([...this.symbols(), 'MARKET']); engine.store.markResearchDone(day); }
+      this.researchDone = true;
+    } catch (error) { this.log(`Research pass failed: ${error.message}`); }
+  }
+  async thesesPass() {
+    const engine = this.expertEngine(), day = this.day, symbols = this.symbols();
+    if (!engine) return;
+    try {
+      const stored = engine.store.thesesFor(day);
+      if (!symbols.every(symbol => stored[symbol])) await this.expert.theses({ symbols, day, asOf: engine.state.dataset.at(-1).timestamp, state: engine.state });
+      this.thesesDone = true;
+    } catch (error) { if (!this.expertFault(error)) this.log(`Theses failed: ${error.message}`); }
+  }
+  // One call per target; a failure marks that target's coverage missing and never throws. Results reach both engines through the serial queue.
+  async research(targets) {
+    const records = [];
+    for (const symbol of targets) {
+      try { records.push(...(await this.expert.research({ symbol, now: new Date(this.now()).toISOString() })).records); this.coverageMissing.delete(symbol); }
+      catch (error) { this.coverageMissing.add(symbol); this.log(`Research for ${symbol} failed; coverage missing: ${error.message}`); }
+    }
+    if (!records.length) return;
+    this.pending = this.pending.then(() => this.run(() => {
+      try { this.mergeIntelligence(this.engine, records); } catch (error) { if (fatal(error)) return this.die(error); this.log(`Research not applied to the rules book: ${error.message}`); }
+      const expert = this.expertEngine();
+      try { if (expert) this.mergeIntelligence(expert, records); } catch (error) { if (!this.expertFault(error)) this.log(`Research not applied to the expert book: ${error.message}`); }
+    }));
+    return this.pending;
+  }
+  // Drops records whose id the engine already has, and any that would make its record set invalid (which would veto every entry).
+  mergeIntelligence(engine, records) {
+    const merged = [...(engine.state.intelligenceRecords ?? [])], ids = new Set(merged.map(item => item.id));
+    for (const item of records) {
+      if (ids.has(item.id)) continue;
+      try { validateIntelligence([...merged, item]); merged.push(item); ids.add(item.id); } catch (error) { this.log(`Research record ${item.id} dropped: ${error.message}`); }
+    }
+    if (merged.length > (engine.state.intelligenceRecords ?? []).length) engine.setIntelligence(merged);
+  }
   poll() {
     const now = this.now(), window = this.sessionWindow;
     if (!window || !['live', 'disconnected', 'login-needed'].includes(this.state)) return;
+    this.scheduleExpert();
     if (this.state === 'live' && this.builder) {
       const row = this.builder.flush(now);
       if (row) this.handleRow(row);
@@ -147,6 +254,9 @@ export class LiveRunner {
     dataQuality.partial = this.partial;
     dataQuality.flagged = dataQuality.partial || dataQuality.thinBars > 0.2 * this.barsToday || dataQuality.dropped > 0.01 * dataQuality.ticks || dataQuality.skewed || dataQuality.rejectedRows > 0;
     this.pending = this.pending.then(() => this.run(() => this.engine.dailyReport(day, dataQuality))).catch(error => this.log(`Daily report failed: ${error.message}`));
+    if (!this.expertEngine()) return;
+    this.pending = this.pending.then(() => this.run(() => this.expert.scoring(day, { ...dataQuality, expertRejectedRows: c.expertRejectedRows })))
+      .catch(error => { if (!this.expertFault(error)) this.log(`Expert report failed: ${error.message}`); });
   }
   later(fn, ms) {
     if (this.intervalMs <= 0) return;
@@ -155,10 +265,12 @@ export class LiveRunner {
   die(error) { this.stop(); this.onFatal(error); return this.status(); }
   stopTimers() { for (const clear of this.timers.splice(0)) clear(); }
   stop() { this.stopTimers(); this.source.stop(); this.state = 'idle'; }
-  idle() { return this.pending; }
+  async idle() { await this.expertTask; return this.pending; }
   status() {
     return { state: this.state, day: this.day, lastTickAt: this.lastTickAt ? new Date(this.lastTickAt).toISOString() : null, barsToday: this.barsToday,
-      counters: { ...this.counters, ...(this.builder?.counters ?? {}) }, cleanBarsSinceGap: this.cleanBarsSinceGap, skewed: this.skewed };
+      counters: { ...this.counters, ...(this.builder?.counters ?? {}) }, cleanBarsSinceGap: this.cleanBarsSinceGap, skewed: this.skewed,
+      ...(this.expert && { expert: { enabled: true, researchDone: this.researchDone, thesesDone: this.thesesDone, anomalyCalls: this.anomalyCalls,
+        limitUntil: this.expert.decider?.limitUntil ? new Date(this.expert.decider.limitUntil).toISOString() : null, coverageMissing: [...this.coverageMissing].sort(), halted: this.expertHalted } }) };
   }
 }
 
