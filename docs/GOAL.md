@@ -19,7 +19,7 @@ The 1–2% per day idea is not a target. Compounded for a year it is 12× to 147
 | Phase | What runs | Money at risk | Exit bar |
 |---|---|---|---|
 | 1 — Prospective paper | Live Kite data on the VPS, rules-only strategies, simulated fills, full cost model | None (₹500/month data + VPS) | 40 trading sessions; net ≥ 0 after fixed costs; beats equal-weight buy-and-hold on the watchlist; no unexplained ledger difference; no missed protective exit |
-| 1b — Expert layers | Same live stream; model profile runs in *shadow* (proposals recorded, not executed); news/evidence capture | None | Shadow proposals beat rules on the same period, after model cost |
+| 1b — AI shadow | Same live stream; Claude picks a strategy on signal bars in a separate paper ledger ([design](superpowers/specs/2026-10-18-phase1b-ai-shadow-design.md)) | None (AI ≤ ₹1,000/month) | Over the same 40 clean sessions: AI book net after AI spend beats the rules book, with at least 20 disagreements |
 | 2 — Capped live | Real orders through Kite with the Phase 1 configuration | An amount I set in writing, with a written max loss | Fills and costs match paper assumptions; no duplicate or uncertain orders |
 | 3 — Expand | More capital, instruments, horizons; US markets | Decided then | Decided then |
 
@@ -45,7 +45,7 @@ Values the bot uses that only I can set. Defaults are what Phase 1 starts with; 
 | Bar size / horizon | 15-minute closed bars; hold 1–5 sessions; delivery (CNC), long-only | me, before Phase 1 |
 | Risk per trade / max daily loss / max drawdown | 0.5% / 3% / 8% | me, before Phase 1 |
 | Phase 1 length | 40 trading sessions | me, before Phase 1 |
-| Monthly spend cap (data + VPS + models) | ₹1,200 | me, before Phase 1 |
+| Monthly spend cap (data + VPS + models) | ₹2,500 (raised from ₹1,200 on 18 Oct 2026 for the ₹1,000 AI shadow ceiling) | me |
 | Live capital and max loss | unset — Phase 2 cannot start without it | me, before Phase 2 |
 
 ## Later, not now
