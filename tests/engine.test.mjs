@@ -322,3 +322,97 @@ test('stored state without expert settings loads with the expert defaults and ke
   engine.settings({ expert: { maxResearchPerSession: 2 } });
   assert.equal(engine.state.settings.expert.maxResearchPerSession, 2);
 });
+
+const verdict = o => ({ action: 'abstain', reason: 'none', evidence: [], counterEvidence: [], tightenStopTo: null, trigger: null, record: null, ...o });
+const decider = fn => async args => verdict(await fn(args));
+function expertEngine(t, fn, { dataset, mode = 'momentum' } = {}) {
+  const { engine } = fixture(t, { dataset, decider: decider(fn) });
+  engine.settings({ strategy: { mode }, risk: { trailingStopPct: 0 } });
+  return engine;
+}
+
+test('decider enter is sized by the engine, tagged expert and recorded', async t => {
+  const engine = expertEngine(t, () => ({ action: 'enter', reason: 'thesis', trigger: 'entry', record: { a: 1 } }));
+  await step(engine);
+  const p = engine.state.positions[0], d = engine.state.decisions.at(-1);
+  assert.ok(p.quantity > 0 && p.strategyId === 'expert');
+  assert.equal(d.action, 'BUY'); assert.equal(d.strategyId, 'expert'); assert.equal(d.expert.a, 1); assert.equal(d.trigger, 'entry');
+  assert.equal(d.provider, 'claude-code'); assert.equal(d.model, engine.state.settings.expert.decisionModel);
+  assert.equal(d.outcome, 'Paper buy filled'); assert.equal(engine.state.trades[0].strategyId, 'expert');
+});
+
+test('decider with no record is recorded as rules-provider', async t => {
+  const engine = expertEngine(t, () => ({ action: 'abstain' }));
+  await step(engine);
+  const d = engine.state.decisions.at(-1);
+  assert.equal(d.action, 'HOLD'); assert.equal(d.provider, 'rules'); assert.equal(d.expert, null);
+});
+
+test('decider entries use the same sizing as the rules book', async t => {
+  const expert = expertEngine(t, () => ({ action: 'enter', reason: 'thesis', record: {} }));
+  const { engine: rules } = fixture(t); rules.settings({ risk: { trailingStopPct: 0 } });
+  await step(expert); await step(rules);
+  assert.equal(rules.state.positions[0].strategyId, 'momentum');
+  assert.equal(expert.state.positions[0].quantity, rules.state.positions[0].quantity);
+  assert.equal(expert.state.positions[0].stopPrice, rules.state.positions[0].stopPrice);
+});
+
+test('tightenStopTo is applied on the bar timestamp; widening, unchanged and above-mark are rejected', async t => {
+  let tighten = null;
+  const engine = expertEngine(t, ({ state }) => state.positions.length ? { tightenStopTo: tighten } : { action: 'enter', record: {} });
+  await step(engine);
+  const stop = engine.state.positions[0].stopPrice;
+  tighten = stop + 1; await step(engine);
+  const p = engine.state.positions[0], d1 = engine.state.decisions.at(-1);
+  assert.equal(p.stopPrice, stop + 1); assert.equal(d1.stopRejected, undefined);
+  assert.deepEqual(p.stopRevisions, [{ timestamp: engine.state.dataset[engine.state.cursor].timestamp, previous: stop, next: stop + 1, source: 'expert' }]);
+  for (const [value, reason] of [[stop - 1, 'widening'], [stop + 1, 'unchanged'], [1e9, 'above-mark'], [Number.NaN, 'invalid']]) {
+    tighten = value; await step(engine);
+    assert.equal(engine.state.decisions.at(-1).stopRejected, reason);
+    assert.equal(engine.state.positions[0].stopPrice, stop + 1); assert.equal(engine.state.positions[0].stopRevisions.length, 1);
+  }
+});
+
+test('a gap stop closes the position before a decider exit: one sale only', async t => {
+  const engine = expertEngine(t, ({ state }) => state.positions.length ? { action: 'exit', reason: 'thesis broken', tightenStopTo: 150, record: {} } : {});
+  seed(engine, { strategyId: 'expert', stopPrice: 200 });
+  await step(engine);
+  const sells = engine.state.trades.filter(trade => trade.action === 'SELL');
+  assert.equal(sells.length, 1); assert.match(sells[0].reason, /Gap protective stop/);
+  assert.equal(engine.state.decisions.at(-1).outcome, 'Gap stop filled'); assert.equal(engine.state.positions.length, 0);
+});
+
+test('decider exit sells at the next open', async t => {
+  const engine = expertEngine(t, ({ state }) => state.positions.length ? { action: 'exit', reason: 'thesis broken', record: {} } : {});
+  seed(engine, { strategyId: 'expert' });
+  await step(engine);
+  assert.equal(engine.state.positions.length, 0); assert.equal(engine.state.trades[0].reason, 'thesis broken'); assert.equal(engine.state.trades[0].phase, 'open');
+  assert.equal(engine.state.decisions.at(-1).outcome, 'Paper strategy sell filled');
+});
+
+test('decider errors suppress entries and keep the held position', async t => {
+  const engine = expertEngine(t, () => { throw Object.assign(new Error('call limit reached'), { code: 'MODEL_LIMIT' }); });
+  seed(engine, { strategyId: 'expert' });
+  await step(engine);
+  const d = engine.state.decisions.at(-1);
+  assert.equal(d.action, 'HOLD'); assert.match(d.outcome, /^Suppressed: call limit reached/);
+  assert.equal(engine.state.positions.length, 1); assert.equal(engine.state.trades.length, 0);
+});
+
+test('storage failures from the decider still abort the step', async t => {
+  const engine = expertEngine(t, () => { throw Object.assign(new Error('disk'), { code: 'PERSISTENCE_ERROR' }); });
+  const cursor = engine.state.cursor;
+  await assert.rejects(step(engine), /disk/);
+  assert.equal(engine.state.cursor, cursor); assert.equal(engine.state.persistenceFault, true);
+});
+
+test('blocked entries are not offered to the decider; held positions still are', async t => {
+  const seen = [];
+  const engine = expertEngine(t, ({ symbol }) => { seen.push(symbol); return { action: 'enter', record: {} }; }, { dataset: rows(['A', 'B']) });
+  seed(engine, { strategyId: 'expert' });
+  await engine.step({ runId: engine.state.runId, expectedCursor: engine.state.cursor, blockEntries: 'market halt' });
+  assert.deepEqual(seen, ['A']);
+  const b = engine.state.decisions.find(d => d.symbol === 'B');
+  assert.equal(b.action, 'HOLD'); assert.match(b.outcome, /^Suppressed: entries blocked.*market halt/);
+  assert.equal(engine.state.positions.length, 1);
+});
