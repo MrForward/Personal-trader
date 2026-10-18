@@ -34,6 +34,21 @@ Running on the owner's Mac while the AWS account finishes activating:
 
 ## Phase 1b build — 18 October 2026
 
+**Live Claude check, 18 October 2026 (owner's Mac, Max subscription token via `claude setup-token`):**
+- Works: login headless, structured output, usage and cost fields. An Opus 5.5 decision returned a valid abstain in 17 s, and Sonnet 5.5 research completed in about 20 s.
+- Fixed from the live run:
+  - CLI 2.1.52 rejects Opus 5.5, so Claude Code is now pinned at 2.1.302 in `package.json`.
+  - `--json-schema` needs one extra turn, so the runner adds it.
+  - Research needed more than 3 turns; it is now 8.
+  - `WebFetch(domain:x)` matches only the exact host, so `*.x` rules were added.
+  - With no token, a call now fails at once.
+  - A corrupt expert DB no longer stops the rules server.
+- Open:
+  - Under `--json-schema`, an API error makes the CLI hang until the bot's timeout instead of reporting. A usage limit therefore shows as `MODEL_TIMEOUT`, not `MODEL_LIMIT`.
+  - Research saves no records today. NSE and BSE block automated fetches (timeout, 403), Reuters, Mint and ET are unreachable, and the prompt omits any item without a verifiable publication time. The source list and the research strategy need an owner decision.
+  - Not yet run under the VPS systemd unit.
+
+
 Phase 1b is the expert shadow: a second paper book decided by Claude through the owner's Claude Max subscription, on branch `phase1b-expert-shadow`. Design: [expert shadow spec](superpowers/specs/2026-10-18-phase1b-expert-shadow-design.md); plan: [expert shadow plan](superpowers/plans/2026-10-18-phase1b-expert-shadow.md). The earlier [AI shadow design](superpowers/specs/2026-10-18-phase1b-ai-shadow-design.md) is superseded and not to be built.
 
 - Task 1, `src/models.mjs`: `claude-code` provider that runs headless `claude -p` with a schema, a budget and a limit-reset parser.

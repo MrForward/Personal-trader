@@ -12,7 +12,9 @@ export const DEFAULT_SETTINGS = {
   barMinutes: 15,
   // shortcut: placeholder allow-list, the owner confirms it before research is enabled.
   expert: { enabled: false, thesisModel: 'claude-opus-5-5', decisionModel: 'claude-opus-5-5', researchModel: 'claude-sonnet-5-5', maxResearchPerSession: 5,
-    allowedDomains: ['nseindia.com', 'bseindia.com', 'rbi.org.in', 'sebi.gov.in', 'reuters.com', 'livemint.com', 'business-standard.com', 'economictimes.indiatimes.com'] },
+    allowedDomains: ['nseindia.com', 'bseindia.com', 'rbi.org.in', 'sebi.gov.in', 'reuters.com', 'livemint.com', 'business-standard.com', 'economictimes.indiatimes.com',
+      // Spec §5: each universe company's investor-relations domain (owner confirms with the universe).
+      'ril.com', 'infosys.com', 'hdfcbank.com', 'icicibank.com', 'itcportal.com', 'sbi.co.in', 'wipro.com', 'ongcindia.com', 'coalindia.in', 'tatasteel.com'] },
 };
 const DOMAIN = /^[a-z0-9.-]+\.[a-z]{2,}$/, MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const SYMBOL = /^[A-Z0-9][A-Z0-9._&-]{0,24}$/;

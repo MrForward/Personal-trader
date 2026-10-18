@@ -55,8 +55,8 @@ test('same origin twice yields two records that intelligenceContext merges to on
 test('runner receives WebFetch domain rules and no portfolio fields', async () => {
   const seen = []; await run([], { runner: fakeRunner({ records: [], coverageNote: 'none' }, seen) });
   const a = seen[0];
-  assert.ok(a.tools.includes('WebSearch') && a.tools.includes('WebFetch(domain:nseindia.com)'));
-  assert.deepEqual([a.model, a.maxTurns, a.timeoutMs, a.schema], ['claude-sonnet-5-5', 3, 120000, RESEARCH_SCHEMA]);
+  assert.ok(a.tools.includes('WebSearch') && a.tools.includes('WebFetch(domain:nseindia.com)') && a.tools.includes('WebFetch(domain:*.nseindia.com)'));
+  assert.deepEqual([a.model, a.maxTurns, a.timeoutMs, a.schema], ['claude-sonnet-5-5', 8, 120000, RESEARCH_SCHEMA]);
   assert.match(a.systemPrompt, /evidence/i);
   const input = JSON.parse(a.input);
   assert.deepEqual([input.symbol, input.companyName], ['INFY', 'Infosys']); assert.match(input.nowIst, /\+05:30$/);
@@ -90,5 +90,5 @@ test('MARKET call allows primary sourceKind and uses the same tools and maxTurns
   await researchMarket({ now: clock, settings: DEFAULT_SETTINGS, runner: fakeRunner({ records: [], coverageNote: 'n' }, a) });
   await run([], { runner: fakeRunner({ records: [], coverageNote: 'n' }, b) });
   assert.deepEqual(a[0].schema.properties.records.items.properties.sourceKind.enum, ['primary', 'calendar', 'news']);
-  assert.deepEqual([a[0].tools, a[0].maxTurns], [b[0].tools, 3]);
+  assert.deepEqual([a[0].tools, a[0].maxTurns], [b[0].tools, 8]);
 });

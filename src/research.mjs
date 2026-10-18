@@ -35,8 +35,9 @@ async function collect({ symbol, extra, now, settings, schema, runner }) {
   const { researchModel, allowedDomains } = settings.expert;
   const nowMs = now();
   const out = await runner({
-    model: researchModel, systemPrompt: SYSTEM_PROMPT, schema, maxTurns: 3, timeoutMs: 120000,
-    tools: ['WebSearch', ...allowedDomains.map(d => `WebFetch(domain:${d})`)],
+    model: researchModel, systemPrompt: SYSTEM_PROMPT, schema, maxTurns: 8, timeoutMs: 120000,
+    // A domain rule matches only that exact host (seen live); the *. rule covers www. and other subdomains.
+    tools: ['WebSearch', ...allowedDomains.flatMap(d => [`WebFetch(domain:${d})`, `WebFetch(domain:*.${d})`])],
     input: JSON.stringify({ symbol, ...extra, nowIst: istString(nowMs), allowedDomains, window: WINDOW }),
   });
   // Stamped when the evidence actually arrived: a research call can run for minutes.

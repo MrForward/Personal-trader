@@ -11,6 +11,9 @@ if (mode === 'ok') {
   process.exit(1);
 } else if (mode === 'badjson') {
   console.log(JSON.stringify({ type: 'result', structured_output: { wrong: 1 } }));
+} else if (mode === 'maxturns') {
+  // Shape seen live from CLI 2.1.52 when --max-turns is too low for --json-schema.
+  console.log(JSON.stringify({ type: 'result', subtype: 'error_max_turns', is_error: false, num_turns: 2, usage: { input_tokens: 4, output_tokens: 52 }, total_cost_usd: 0.001 }));
 } else if (mode === 'hang') {
   await new Promise((resolve) => setTimeout(resolve, 10000));
 } else if (mode === 'argv') {

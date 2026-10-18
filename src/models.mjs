@@ -1,8 +1,13 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { redact, registerSecret } from './secrets.mjs';
+
+// The project pins Claude Code in package.json so Mac and VPS run the same tested version; a global `claude` is the fallback.
+const PINNED_CLAUDE = fileURLToPath(new URL('../node_modules/.bin/claude', import.meta.url));
+export const CLAUDE_BINARY = existsSync(PINNED_CLAUDE) ? PINNED_CLAUDE : 'claude';
 
 if (process.env.CLAUDE_CODE_OAUTH_TOKEN) registerSecret(process.env.CLAUDE_CODE_OAUTH_TOKEN);
 
@@ -289,11 +294,12 @@ function parseResetAt(text, now = Date.now()) {
   return new Date(at).toISOString();
 }
 
-// Field names `structured_output`, `usage.input_tokens`, `usage.output_tokens`, `total_cost_usd` per
-// code.claude.com headless docs; written against CLI 2.1.52; live verification pending.
-export async function runClaudeCode({ model, systemPrompt, input, schema, tools = [], maxTurns = 1, maxBudgetUsd = 0.5, timeoutMs = 60000, binary = 'claude', env = process.env, spawnImpl = spawn }) {
+// Field names `structured_output`, `usage.input_tokens`, `usage.output_tokens`, `total_cost_usd` verified live
+// on 18 October 2026 against CLI 2.1.52 and 2.1.302 with a Max subscription token.
+export async function runClaudeCode({ model, systemPrompt, input, schema, tools = [], maxTurns = 1, maxBudgetUsd = 0.5, timeoutMs = 60000, binary = CLAUDE_BINARY, env = process.env, spawnImpl = spawn }) {
   const args = ['-p', '--output-format', 'json', '--model', model, '--system-prompt', systemPrompt, '--json-schema', JSON.stringify(schema),
-    '--max-turns', String(maxTurns), '--max-budget-usd', String(maxBudgetUsd), '--no-session-persistence',
+    // --json-schema delivers the answer in one extra turn; without it a 1-turn call ends as error_max_turns (seen live).
+    '--max-turns', String(maxTurns + 1), '--max-budget-usd', String(maxBudgetUsd), '--no-session-persistence',
     // --tools limits the child to the named built-ins (no Read, Glob, Grep or Bash); --allowedTools then applies the domain rules.
     '--tools', [...new Set(tools.map((tool) => tool.replace(/\(.*$/, '')))].join(','), ...(tools.length ? ['--allowedTools', ...tools] : [])];
   // FAKE_CLAUDE_* lets tests steer tests/fixtures/fake-claude.mjs; real runs never set them.
@@ -320,6 +326,7 @@ export async function runClaudeCode({ model, systemPrompt, input, schema, tools 
   try { result = JSON.parse(stdout.trim().split('\n').filter(Boolean).at(-1)); } catch { result = null; }
   if (!isObject(result)) throw modelError('MODEL_SCHEMA', 'claude -p returned no JSON result.');
   if (result.is_error === true) throw modelError('MODEL_EXIT', 'claude -p reported an error result.');
+  if (result.subtype === 'error_max_turns') throw modelError('MODEL_SCHEMA', `claude -p ran out of turns (${result.num_turns}) before answering.`);
   if (!isObject(result.structured_output)) throw modelError('MODEL_SCHEMA', 'claude -p result has no structured_output.');
   const errors = schemaErrors(result.structured_output, schema);
   if (errors.length) throw modelError('MODEL_SCHEMA', `structured_output violates the schema: ${errors.slice(0, 3).join('; ')}`);

@@ -40,7 +40,7 @@ test('fixed monthly costs and spend cap are validated', () => {
 });
 test('expert settings default off and validate', () => {
   assert.equal(validateSettings({}).expert.enabled, false);
-  assert.equal(DEFAULT_SETTINGS.expert.allowedDomains.length, 8);
+  assert.equal(DEFAULT_SETTINGS.expert.allowedDomains.length, 18);
   assert.equal(DEFAULT_SETTINGS.model.dailyCallLimit, 60);
   assert.throws(() => validateSettings({ expert: { enabled: 'yes' } }));
   assert.throws(() => validateSettings({ expert: { allowedDomains: ['http://x'] } }));

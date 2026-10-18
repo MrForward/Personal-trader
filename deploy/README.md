@@ -123,20 +123,20 @@ Request formats follow [OpenAI Responses structured outputs](https://developers.
 
 The expert paper book calls the Claude Code CLI in print mode (`claude -p`) under your Claude Max subscription. No API key is involved, and marginal model cost is ₹0 under the subscription. The design is in [the Phase 1b spec](../docs/superpowers/specs/2026-10-18-phase1b-expert-shadow-design.md).
 
-1. **On your Mac**, run `claude --version` and note the number, then run `claude setup-token` and sign in with your own Claude account. It prints a one-year OAuth token. Do not paste it into chat, Git or screenshots.
+1. **On your Mac**, run `claude setup-token` and sign in with your own Claude account. It prints a one-year OAuth token. Do not paste it into chat, Git or screenshots.
 2. **On the VPS**, add one line to `/etc/trading-lab.env` with `sudoedit`: `CLAUDE_CODE_OAUTH_TOKEN=<the token>`. Keep the file at mode 0600, root-owned.
 3. **No `ANTHROPIC_API_KEY` may exist** in `/etc/trading-lab.env`, the service user's environment or any profile file. In print mode a key silently takes precedence over the subscription token and would bill the API. Check with `sudo grep -l ANTHROPIC_API_KEY /etc/trading-lab.env /etc/environment` (it names matching files without printing a key; no output is correct) and with `systemctl show trading-lab -p Environment | grep -c ANTHROPIC_API_KEY`, which checks the unit's `Environment=` lines (`0` is correct).
-4. **Install the CLI, pinned** to the version you tested on the Mac: `sudo npm i -g @anthropic-ai/claude-code@<version from claude --version on your Mac>`. Do not use `@latest`; upgrade only after testing the new version on the Mac.
+4. **The CLI comes with the app.** `package.json` pins `@anthropic-ai/claude-code` at 2.1.302 (tested live on 18 October 2026; Opus 5.5 needs 2.1.280 or newer), so `npm ci` in the deploy installs it at `/opt/trading-lab/node_modules/.bin/claude` and the bot uses that copy. No global install is needed. Upgrade by changing the pin, testing on the Mac, then deploying.
 5. **Verify as the service user** without putting the token on a command line or in shell history. In a root shell, the token is loaded from the env file:
 
    ```sh
    sudo -i
    set -a; . /etc/trading-lab.env; set +a
-   sudo -u trading-lab --preserve-env=CLAUDE_CODE_OAUTH_TOKEN claude -p --output-format json --tools "" 'Say ok'
+   echo 'Say ok' | sudo -u trading-lab --preserve-env=CLAUDE_CODE_OAUTH_TOKEN /opt/trading-lab/node_modules/.bin/claude -p --output-format json --tools ""
    exit
    ```
 
-   The JSON result should contain `ok` and `"is_error":false`. Do not use `sudo env CLAUDE_CODE_OAUTH_TOKEN=...`; that records the token.
+   The JSON result should contain `ok` and `"is_error":false`. Send the prompt on stdin as shown: `--tools ""` would otherwise take a prompt argument as a tool name. Do not use `sudo env CLAUDE_CODE_OAUTH_TOKEN=...`; that records the token.
 6. In the dashboard, Configuration section 05, tick **Run the expert book**, and apply. It takes effect at the next service restart: `sudo systemctl restart trading-lab`. The Expert panel then shows **Running**.
 
 **The token is a one-year credential tied to your personal Claude account.** If the VPS may be compromised, revoke it at once in your claude.ai account settings (sign out of or revoke the Claude Code session there), then remove the line from `/etc/trading-lab.env` and restart the service. Revocation pauses the expert layer only; protective exits and the rules book never depend on it. Expect to repeat `claude setup-token` yearly.
