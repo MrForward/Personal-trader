@@ -59,7 +59,7 @@ export class Store {
     return this.db.prepare('SELECT COUNT(*) AS count FROM model_calls WHERE timestamp LIKE ?').get(`${day}%`).count;
   }
   reserveCall(config) {
-    if (!Number.isInteger(config.dailyCallLimit) || config.dailyCallLimit < 0 || config.dailyCallLimit > 200 || !['openai', 'anthropic'].includes(config.provider) || typeof config.model !== 'string') throw new Error('Invalid model call reservation.');
+    if (!Number.isInteger(config.dailyCallLimit) || config.dailyCallLimit < 0 || config.dailyCallLimit > 200 || !['openai', 'anthropic', 'claude-code'].includes(config.provider) || typeof config.model !== 'string') throw new Error('Invalid model call reservation.');
     return this.transaction(() => {
       if (this.callCount() >= config.dailyCallLimit) throw failure('Daily AI call limit reached. No provider request was sent.', 'DAILY_CALL_LIMIT');
       const result = this.db.prepare('INSERT INTO model_calls(timestamp,provider,model,status) VALUES(?,?,?,?)').run(new Date().toISOString(), config.provider, config.model, 'reserved');
