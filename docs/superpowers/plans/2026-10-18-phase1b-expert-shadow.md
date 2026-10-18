@@ -100,7 +100,7 @@ Expected: PASS, all files.
 - [ ] **Step 6: Confirm the real CLI flags once**
 
 Run on the owner's Mac from an empty directory (outside any Claude Code session): `echo '{"ok":true}' | env -u CLAUDECODE claude -p --output-format json --tools "" --max-turns 1 --max-budget-usd 0.05 --json-schema '{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}' --system-prompt "Return the JSON object given."`
-Expected: a JSON result with `structured_output: {"ok": true}`, `usage` and `total_cost_usd`. Record the CLI version and the exact field names in a comment above `runClaudeCode`; adjust the parser if a name differs.
+Expected: a JSON result with `structured_output: {"ok": true}`, `usage` and `total_cost_usd`. Record the CLI version and the exact field names in a comment above `runClaudeCode`; adjust the parser if a name differs. `--max-turns` is absent from `claude --help` in 2.1.52: if the CLI rejects it, drop the flag from `runClaudeCode` and the argv test, and bound research instead with `--max-budget-usd` and the 120 s timeout.
 
 - [ ] **Step 7: Commit**
 
