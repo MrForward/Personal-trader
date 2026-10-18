@@ -113,3 +113,31 @@ test('store kite session round-trips and clears', t => {
   store.saveKiteSession(value); assert.deepEqual(store.loadKiteSession(), value);
   store.clearKiteSession(); assert.equal(store.loadKiteSession(), null);
 });
+
+test('historicalBars day interval returns one bar per completed session with IST dates', async t => {
+  const calls = [];
+  const candles = (token, interval, from, to) => { calls.push({ token, interval, days: Math.round((to - from) / 86_400_000) });
+    return [{ date: new Date('2026-10-12T00:00:00+05:30'), open: 1, high: 3, low: 1, close: 2, volume: 10 }, { date: new Date('2026-10-13T00:00:00+05:30'), open: 2, high: 4, low: 2, close: 3, volume: 20 },
+      { date: new Date('2026-10-14T00:00:00+05:30'), open: 3, high: 9, low: 1, close: 5, volume: 99 }]; };
+  const { session } = setup(t, { client: fakeClient({ candles }) });
+  await session.complete('reqtoken123', ['A', 'B']);
+  const bars = await session.historicalBars({ symbol: 'A', barMinutes: 'day', count: 60, endMs: T('2026-10-14T05:00:00Z') }); // 10:30 IST: today's candle is still forming
+  assert.deepEqual(calls, [{ token: 1, interval: 'day', days: 120 }]);
+  assert.deepEqual(bars, [{ date: '2026-10-12', open: 1, high: 3, low: 1, close: 2, volume: 10 }, { date: '2026-10-13', open: 2, high: 4, low: 2, close: 3, volume: 20 }]);
+  assert.equal((await session.historicalBars({ symbol: 'A', barMinutes: 'day', count: 1, endMs: T('2026-10-14T10:00:00Z') })).at(0).date, '2026-10-14');
+});
+
+test('index bars resolve through one cached instrument lookup and are never stored as subscriptions', async t => {
+  let lookups = 0;
+  const client = fakeClient({ symbols: ['A', 'B', 'NIFTY 50'], candles: token => [{ date: new Date('2026-10-13T00:00:00+05:30'), open: 1, high: 1, low: 1, close: token, volume: 0 }] });
+  const original = client.getInstruments; client.getInstruments = async (...args) => { lookups++; return original(...args); };
+  const { session, store, ticker } = setup(t, { client });
+  await session.complete('reqtoken123', ['A', 'B']);
+  assert.deepEqual(store.loadKiteSession().instruments, { A: 1, B: 2 }); assert.equal(lookups, 1);
+  const args = { symbol: 'NIFTY 50', barMinutes: 'day', count: 5, endMs: T('2026-10-14T05:00:00Z') };
+  assert.equal((await session.historicalBars(args))[0].close, 3); await session.historicalBars(args);
+  assert.equal(lookups, 2);
+  session.ticker().start({ onTick() {}, onClose() {} }); ticker.emit('connect');
+  assert.deepEqual(ticker.subscribed, [1, 2]);
+  await assert.rejects(() => session.historicalBars({ ...args, symbol: 'NOPE' }), /No instrument token for NOPE/);
+});

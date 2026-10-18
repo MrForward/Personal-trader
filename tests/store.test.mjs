@@ -37,3 +37,25 @@ test('separate connections enforce shared call budget and reject stale state wri
   a.save({ cursor: 29 }); a.reserveCall(call); assert.throws(() => b.reserveCall(call), /Daily AI call limit/);
   assert.throws(() => b.save({ cursor: 99 }), /another process/); assert.equal(a.load().cursor, 29);
 });
+test('memoryFor filters by reviewedAt and limits to 5, newest first', t => {
+  const s = store(t);
+  for (let hour = 1; hour <= 7; hour++) s.saveMemory('INFY', `2026-10-14T0${hour}:00:00Z`, { lesson: `L${hour}` });
+  s.saveMemory('SBIN', '2026-10-14T01:00:00Z', { lesson: 'other' });
+  const rows = s.memoryFor('INFY', '2026-10-14T06:30:00Z');
+  assert.deepEqual(rows.map(row => row.lesson), ['L6', 'L5', 'L4', 'L3', 'L2']);
+  assert.ok(rows.every(row => row.reviewedAt <= '2026-10-14T06:30:00.000Z'));
+  assert.equal(s.memoryFor('INFY', '2026-10-14T00:30:00Z').length, 0);
+});
+test('thesis, daily bars and model outputs round-trip', t => {
+  const s = store(t);
+  s.saveThesis('INFY', '2026-10-14', { stance: 'watch' }); s.saveThesis('INFY', '2026-10-14', { stance: 'candidate' }); s.saveThesis('SBIN', '2026-10-14', { stance: 'avoid' });
+  assert.deepEqual(s.thesis('INFY', '2026-10-14'), { stance: 'candidate' }); assert.equal(s.thesis('INFY', '2026-10-15'), null);
+  assert.deepEqual(s.thesesFor('2026-10-14'), { INFY: { stance: 'candidate' }, SBIN: { stance: 'avoid' } });
+  const bars = [{ date: '2026-10-13', open: 1, high: 2, low: 1, close: 2, volume: 5 }];
+  s.saveDaily('2026-10-14', 'NIFTY 50', bars); s.saveDaily('2026-10-14', 'INFY', bars); s.saveDaily('2026-10-14', 'INFY', bars);
+  assert.deepEqual(s.dailyFor('2026-10-14'), { 'NIFTY 50': bars, INFY: bars }); assert.deepEqual(s.dailyFor('2026-10-15'), {});
+  const row = { key: 'k1', engine: 'B', symbol: 'INFY', trigger: 'thesis', asOf: '2026-10-14T03:15:00Z', promptHash: 'h', request: { a: 1 }, response: { b: 2 }, usage: { inputTokens: 3 }, costUsd: 0.12 };
+  s.saveModelOutput(row); s.saveModelOutput({ ...row, response: { b: 'changed' } });
+  assert.deepEqual({ ...s.modelOutput('k1'), createdAt: undefined }, { ...row, createdAt: undefined });
+  assert.equal(typeof s.modelOutput('k1').createdAt, 'string'); assert.equal(s.modelOutput('missing'), null);
+});

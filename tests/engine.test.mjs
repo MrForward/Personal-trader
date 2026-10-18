@@ -312,3 +312,13 @@ test('review #5: a same-day round trip is charged at intraday rates with no DP c
   approx(engine.state.realizedPnl, (sell.price - buy.price) * buy.quantity - expected);
   approx(engine.state.cash, 1000 + engine.state.realizedPnl);
 });
+
+test('stored state without expert settings loads with the expert defaults and keeps validating updates', t => {
+  const store = new Store(':memory:'); t.after(() => store.close());
+  const first = new TradingEngine(store), legacy = structuredClone(first.state);
+  delete legacy.settings.expert; store.save(legacy, 'legacy');
+  const engine = new TradingEngine(store);
+  assert.equal(engine.state.settings.expert.enabled, false);
+  engine.settings({ expert: { maxResearchPerSession: 2 } });
+  assert.equal(engine.state.settings.expert.maxResearchPerSession, 2);
+});

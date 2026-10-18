@@ -79,6 +79,7 @@ export class TradingEngine {
     this.state.settings.universe ??= DEFAULT_SETTINGS.universe; this.state.settings.barMinutes ??= DEFAULT_SETTINGS.barMinutes;
     this.state.settings.simulation.costSchedule ??= DEFAULT_SETTINGS.simulation.costSchedule; delete this.state.settings.simulation.feeBps;
     this.state.settings.simulation.fixedCostsPerMonthInr ??= DEFAULT_SETTINGS.simulation.fixedCostsPerMonthInr; this.state.settings.simulation.spendCapPerMonthInr ??= DEFAULT_SETTINGS.simulation.spendCapPerMonthInr;
+    this.state.settings.expert ??= clone(DEFAULT_SETTINGS.expert);
     this.state.cappedBenchmark ??= benchmark(this.state.settings.simulation.startingCapital, true);
     this.state.riskLatched ??= this.state.status === 'risk-paused';
     this.state.sessionDay ??= sessionDay(this.state.dataset[this.state.cursor].timestamp);

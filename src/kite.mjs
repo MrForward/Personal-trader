@@ -2,7 +2,8 @@ import { KiteConnect, KiteTicker } from 'kiteconnect';
 import { registerSecret } from './secrets.mjs';
 import { sessionFor } from './calendar.mjs';
 
-const INTERVALS = { 5: '5minute', 15: '15minute', 60: '60minute' };
+const INTERVALS = { 5: '5minute', 15: '15minute', 60: '60minute', day: 'day' };
+const istDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' });
 const DAY_MS = 86_400_000;
 
 // Kite personal tokens expire at 06:00 IST; the next expiry strictly after `now`.
@@ -49,13 +50,31 @@ export class KiteSession {
     const saved = this.store.loadKiteSession();
     if (saved) this.store.saveKiteSession({ ...saved, expiresAt: new Date(this.now()).toISOString() });
   }
+  // Universe tokens come from the stored map (the ticker subscribes to those). Anything else, such as an index, comes
+  // from one NSE instrument list per process, which keeps index tokens out of the stored map and the live stream.
+  async tokenFor(symbol) {
+    const stored = this.status().instruments[symbol];
+    if (stored || this.status().state === 'none') return stored;
+    this.listed ??= this.client.getInstruments('NSE').then(list => new Map(list.map(item => [item.tradingsymbol, item.instrument_token])), error => { this.listed = null; throw error; });
+    return (await this.listed).get(symbol);
+  }
   async historicalBars({ symbol, barMinutes, count, endMs }) {
     const interval = INTERVALS[barMinutes];
     if (!interval) throw new Error(`Unsupported bar size: ${barMinutes} minutes.`);
-    const token = this.status().instruments[symbol];
+    const token = await this.tokenFor(symbol);
     if (!token) throw new Error(`No instrument token for ${symbol}; log in again.`);
-    const candles = await this.client.getHistoricalData(token, interval, new Date(endMs - 10 * DAY_MS), new Date(endMs));
+    const daily = barMinutes === 'day';
+    const candles = await this.client.getHistoricalData(token, interval, new Date(endMs - (daily ? 120 : 10) * DAY_MS), new Date(endMs));
     const bars = [];
+    if (daily) {
+      // A day candle is stamped with its session date; it is only final once that session has closed.
+      for (const candle of candles) {
+        const date = istDate.format(new Date(candle.date));
+        if (Date.parse(`${date}T15:30:00+05:30`) > endMs) continue;
+        bars.push({ date, open: candle.open, high: candle.high, low: candle.low, close: candle.close, volume: candle.volume });
+      }
+      return bars.slice(-count);
+    }
     for (const candle of candles) {
       const start = new Date(candle.date).getTime(), session = sessionFor(start);
       const end = Math.min(start + barMinutes * 60_000, session?.closeMs ?? Infinity);

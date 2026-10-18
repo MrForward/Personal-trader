@@ -14,7 +14,12 @@ export class Store {
       CREATE TABLE IF NOT EXISTS archived_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS model_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL, usage TEXT);
       CREATE TABLE IF NOT EXISTS daily_report (day TEXT PRIMARY KEY, payload TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS kite_session (id INTEGER PRIMARY KEY CHECK(id=1), access_token TEXT NOT NULL, user_id TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, instruments TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS kite_session (id INTEGER PRIMARY KEY CHECK(id=1), access_token TEXT NOT NULL, user_id TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, instruments TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS expert_thesis (symbol TEXT NOT NULL, day TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(symbol, day));
+      CREATE TABLE IF NOT EXISTS expert_memory (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, reviewedAt TEXT NOT NULL, payload TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS expert_memory_symbol ON expert_memory(symbol, reviewedAt);
+      CREATE TABLE IF NOT EXISTS expert_daily (day TEXT NOT NULL, symbol TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(day, symbol));
+      CREATE TABLE IF NOT EXISTS model_outputs (key TEXT PRIMARY KEY, engine TEXT NOT NULL, symbol TEXT, trigger TEXT NOT NULL, asOf TEXT NOT NULL, promptHash TEXT NOT NULL, request TEXT NOT NULL, response TEXT NOT NULL, usage TEXT, costUsd REAL, createdAt TEXT NOT NULL);`);
     if (!this.db.prepare('PRAGMA table_info(state)').all().some(column => column.name === 'revision')) this.db.exec('ALTER TABLE state ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
     this.revision = this.db.prepare('SELECT revision FROM state WHERE id=1').get()?.revision ?? 0;
   }
@@ -94,6 +99,35 @@ export class Store {
   }
   dailyReports() { return this.db.prepare('SELECT day,payload FROM daily_report ORDER BY day').all().map(row => ({ ...JSON.parse(row.payload), day: row.day })); }
   hasDailyReport(day) { return Boolean(this.db.prepare('SELECT 1 FROM daily_report WHERE day=?').get(day)); }
+  saveThesis(symbol, day, payload) {
+    this.db.prepare('INSERT INTO expert_thesis(symbol,day,payload) VALUES(?,?,?) ON CONFLICT(symbol,day) DO UPDATE SET payload=excluded.payload').run(symbol, day, JSON.stringify(payload));
+  }
+  thesis(symbol, day) {
+    const row = this.db.prepare('SELECT payload FROM expert_thesis WHERE symbol=? AND day=?').get(symbol, day);
+    return row ? JSON.parse(row.payload) : null;
+  }
+  thesesFor(day) { return Object.fromEntries(this.db.prepare('SELECT symbol,payload FROM expert_thesis WHERE day=? ORDER BY symbol').all(day).map(row => [row.symbol, JSON.parse(row.payload)])); }
+  saveMemory(symbol, reviewedAt, payload) {
+    this.db.prepare('INSERT INTO expert_memory(symbol,reviewedAt,payload) VALUES(?,?,?)').run(symbol, new Date(reviewedAt).toISOString(), JSON.stringify(payload));
+  }
+  // Newest first; a lesson is invisible before the moment it was written, so replays cannot see hindsight.
+  memoryFor(symbol, asOf, limit = 5) {
+    return this.db.prepare('SELECT reviewedAt,payload FROM expert_memory WHERE symbol=? AND reviewedAt<=? ORDER BY reviewedAt DESC, id DESC LIMIT ?')
+      .all(symbol, new Date(asOf).toISOString(), limit).map(row => ({ ...JSON.parse(row.payload), reviewedAt: row.reviewedAt }));
+  }
+  saveDaily(day, symbol, bars) {
+    this.db.prepare('INSERT INTO expert_daily(day,symbol,payload) VALUES(?,?,?) ON CONFLICT(day,symbol) DO UPDATE SET payload=excluded.payload').run(day, symbol, JSON.stringify(bars));
+  }
+  dailyFor(day) { return Object.fromEntries(this.db.prepare('SELECT symbol,payload FROM expert_daily WHERE day=? ORDER BY symbol').all(day).map(row => [row.symbol, JSON.parse(row.payload)])); }
+  // First write wins: replay must keep serving the output that was actually recorded.
+  saveModelOutput({ key, engine, symbol = null, trigger, asOf, promptHash, request, response, usage = null, costUsd = null, createdAt = new Date().toISOString() }) {
+    this.db.prepare('INSERT OR IGNORE INTO model_outputs(key,engine,symbol,trigger,asOf,promptHash,request,response,usage,costUsd,createdAt) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+      .run(key, engine, symbol, trigger, asOf, promptHash, JSON.stringify(request), JSON.stringify(response), JSON.stringify(usage), costUsd, createdAt);
+  }
+  modelOutput(key) {
+    const row = this.db.prepare('SELECT * FROM model_outputs WHERE key=?').get(key);
+    return row ? { ...row, request: JSON.parse(row.request), response: JSON.parse(row.response), usage: JSON.parse(row.usage) } : null;
+  }
   clearKiteSession() { this.db.prepare('DELETE FROM kite_session WHERE id=1').run(); }
   audit() { return this.db.prepare('SELECT * FROM audit ORDER BY id').all().map(row => ({ ...row, payload: JSON.parse(row.payload) })); }
   archiveCount() { return this.db.prepare('SELECT COUNT(*) AS count FROM archived_runs').get().count; }
