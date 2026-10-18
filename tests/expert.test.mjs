@@ -310,35 +310,42 @@ const sthesis = (over = {}) => ({ stance: 'candidate', invalidation: { priceBelo
 test('scoreDecisions: invalidation hit, mfe/mae, rules window, thesis states', () => {
   const expertState = { dataset: sdata, decisions: [sdecision(), sdecision({ id: 'skip', trigger: null })], trades: [strade('BUY', 0, 1), strade('SELL', -3, 3)] };
   const rulesState = { trades: [strade('BUY', 0, 2), strade('SELL', 1.2, 4)] };
-  const [score, ...rest] = scoreDecisions({ expertState, rulesState, day: '2026-10-14', theses: { DEMO1: sthesis() } });
+  const [score, ...rest] = scoreDecisions({ expertState, rulesState, day: '2026-10-14', thesisFor: () => sthesis() });
   assert.equal(rest.length, 0);
   assert.deepEqual(score, { decisionId: 'd1', symbol: 'DEMO1', trigger: 'entry', action: 'enter', reason: 'because', invalidationHit: true, mfe: 3, mae: -4, realised: -3,
-    rulesSameWindow: { entered: true, realised: 1.2 }, thesisScore: 'invalidated', closedOnDay: true });
+    rulesSameWindow: { entered: true, realised: 1.2 }, thesisScore: 'invalidated' });
   const rising = sdata.map((r, i) => i === 5 ? { ...r, bars: { DEMO1: { ...r.bars.DEMO1, close: 101 } } } : r);
-  const calm = scoreDecisions({ expertState: { ...expertState, dataset: rising, trades: [] }, rulesState: { trades: [] }, day: '2026-10-14', theses: { DEMO1: sthesis({ invalidation: { priceBelow: 90 } }) } })[0];
-  assert.equal(calm.invalidationHit, false); assert.equal(calm.thesisScore, 'held'); assert.equal(calm.closedOnDay, false); assert.deepEqual(calm.rulesSameWindow, { entered: false, realised: 0 });
-  const longer = scoreDecisions({ expertState, rulesState, day: '2026-10-14', theses: { DEMO1: sthesis({ invalidation: { priceBelow: 90 }, expectedHoldSessions: 3 }) } })[0];
+  const calm = scoreDecisions({ expertState: { ...expertState, dataset: rising, trades: [] }, rulesState: { trades: [] }, day: '2026-10-14', thesisFor: () => sthesis({ invalidation: { priceBelow: 90 } }) })[0];
+  assert.equal(calm.invalidationHit, false); assert.equal(calm.thesisScore, 'held'); assert.deepEqual(calm.rulesSameWindow, { entered: false, realised: 0 });
+  const longer = scoreDecisions({ expertState, rulesState, day: '2026-10-14', thesisFor: () => sthesis({ invalidation: { priceBelow: 90 }, expectedHoldSessions: 3 }) })[0];
   assert.equal(longer.thesisScore, 'open');
-  const down = scoreDecisions({ expertState, rulesState, day: '2026-10-14', theses: { DEMO1: sthesis({ invalidation: { priceBelow: 90 } }) } })[0];
+  const down = scoreDecisions({ expertState, rulesState, day: '2026-10-14', thesisFor: () => sthesis({ invalidation: { priceBelow: 90 } }) })[0];
   assert.equal(down.thesisScore, 'expired');
 });
 
 test('scoreDecisions: abstention is scored against what rules did', () => {
   const expertState = { dataset: sdata, decisions: [sdecision({ action: 'HOLD', expert: { action: 'abstain', reason: 'thin', invalidation: { priceBelow: 90 } } })], trades: [] };
   const rulesState = { trades: [strade('BUY', 0, 1), strade('SELL', -2, 3), { ...strade('SELL', 9, 3), symbol: 'OTHER' }] };
-  const [score] = scoreDecisions({ expertState, rulesState, day: '2026-10-14', theses: {} });
+  const [score] = scoreDecisions({ expertState, rulesState, day: '2026-10-14' });
   assert.equal(score.action, 'abstain'); assert.deepEqual(score.rulesSameWindow, { entered: true, realised: -2 }); assert.equal(score.realised, 0);
 });
 
-const scoreRow = (symbol, over = {}) => ({ decisionId: `d-${symbol}`, symbol, trigger: 'entry', action: 'enter', reason: 'r', invalidationHit: false, mfe: 1, mae: -1, realised: 5, rulesSameWindow: { entered: false, realised: 0 }, thesisScore: 'held', closedOnDay: true, ...over });
+const scoreRow = (symbol, over = {}) => ({ decisionId: `d-${symbol}`, symbol, trigger: 'entry', action: 'enter', reason: 'r', invalidationHit: false, mfe: 1, mae: -1, realised: 5, rulesSameWindow: { entered: false, realised: 0 }, thesisScore: 'held', ...over });
 const reviewValue = { lesson: 'Wait for confirmation.', decisionQuality: 'good', note: 'ok' };
+const rtrade = (symbol, action, i, realizedPnl = 0) => ({ id: `${symbol}-${action}-${i}`, symbol, action, timestamp: sdata[i].timestamp, realizedPnl });
+const closedState = (...symbols) => ({ decisions: [], trades: symbols.flatMap(symbol => [rtrade(symbol, 'BUY', 1), rtrade(symbol, 'SELL', 3, -3)]) });
+const okRunner = calls => async args => { calls.push(args); return { value: reviewValue, usage: { inputTokens: 1, outputTokens: 1 }, costUsd: 0.02 }; };
 
 test('reviewClosed writes one memory per closed position and memoryFor hides it before its timestamp', async t => {
   const store = new Store(':memory:'); t.after(() => store.close());
-  const calls = [], runner = async args => { calls.push(args); return { value: reviewValue, usage: { inputTokens: 1, outputTokens: 1 }, costUsd: 0.02 }; };
-  const scores = [scoreRow('DEMO1'), scoreRow('DEMO1', { decisionId: 'again' }), scoreRow('DEMO2'), scoreRow('DEMO3', { closedOnDay: false })];
-  assert.equal(await reviewClosed({ store, settings: DEFAULT_SETTINGS, day, scores, runner }), 2);
+  const calls = [], runner = okRunner(calls), score = scoreRow('DEMO1', { decisionId: 'd1' });
+  const expertState = { decisions: [sdecision(), sdecision({ id: 'other', symbol: 'DEMO2', executionTimestamp: sdata[2].timestamp })],
+    trades: [...closedState('DEMO1', 'DEMO2').trades, rtrade('DEMO3', 'BUY', 2)] }; // DEMO3 is still open
+  assert.equal(await reviewClosed({ store, settings: DEFAULT_SETTINGS, day, scores: [score], expertState, runner }), 2);
   assert.equal(calls.length, 2); assert.equal(calls[0].model, DEFAULT_SETTINGS.expert.researchModel); assert.equal(calls[0].maxTurns, 1);
+  const input = JSON.parse(calls[0].input);
+  assert.equal(input.symbol, 'DEMO1'); assert.equal(input.realised, -3); assert.equal(input.decisions.length, 1); assert.deepEqual(input.decisions[0].score, score); assert.equal(input.decisions[0].reason, 'because');
+  assert.equal(JSON.parse(calls[1].input).decisions[0].score, null);
   const closeIso = '2026-10-14T10:00:00.000Z';
   assert.equal(store.memoryFor('DEMO1', '2026-10-14T09:59:59Z').length, 0);
   const [memory] = store.memoryFor('DEMO1', closeIso);
@@ -346,22 +353,62 @@ test('reviewClosed writes one memory per closed position and memoryFor hides it 
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM model_outputs WHERE trigger='review'").get().n, 2);
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM model_calls").get().n, 2);
   // Running it again serves the recorded outputs: no calls and no duplicate memory.
-  assert.equal(await reviewClosed({ store, settings: DEFAULT_SETTINGS, day, scores, runner }), 0);
+  assert.equal(await reviewClosed({ store, settings: DEFAULT_SETTINGS, day, scores: [score], expertState, runner }), 0);
   assert.equal(calls.length, 2); assert.equal(store.memoryFor('DEMO1', closeIso).length, 1);
 });
 
-test('reviewClosed replays without calls, and failures are suppressed, logged and not stored as memory', async t => {
+test('two closes of one symbol on one day get two reviews with distinct replay keys', async t => {
+  const store = new Store(':memory:'); t.after(() => store.close());
+  const calls = [], expertState = { decisions: [], trades: [rtrade('DEMO1', 'BUY', 0), rtrade('DEMO1', 'SELL', 1, 2), rtrade('DEMO1', 'BUY', 2), rtrade('DEMO1', 'SELL', 3, -1)] };
+  assert.equal(await reviewClosed({ store, settings: DEFAULT_SETTINGS, day, scores: [], expertState, runner: okRunner(calls) }), 2);
+  assert.equal(calls.length, 2); assert.equal(store.memoryFor('DEMO1', '2026-10-14T10:00:00Z').length, 2);
+  assert.equal(store.db.prepare("SELECT COUNT(DISTINCT key) AS n FROM model_outputs WHERE trigger='review'").get().n, 2);
+  assert.deepEqual(calls.map(c => JSON.parse(c.input).realised), [2, -1]);
+  const again = [];
+  assert.equal(await reviewClosed({ store, settings: DEFAULT_SETTINGS, day, scores: [], expertState, runner: okRunner(again), replay: true }), 0);
+  assert.equal(again.length, 0);
+});
+
+test('reviewClosed failures are suppressed, logged and not stored; replay misses abort', async t => {
   const store = new Store(':memory:'); t.after(() => store.close());
   const logs = [], log = message => logs.push(message);
   const bad = async () => ({ value: { lesson: 'x', decisionQuality: 'great', note: '' }, usage: {}, costUsd: 0 });
-  assert.equal(await reviewClosed({ store, settings: DEFAULT_SETTINGS, day, scores: [scoreRow('DEMO1')], runner: bad, log }), 0);
+  assert.equal(await reviewClosed({ store, settings: DEFAULT_SETTINGS, day, scores: [], expertState: closedState('DEMO1'), runner: bad, log }), 0);
   assert.equal(logs.length, 1); assert.match(logs[0], /DEMO1/); assert.equal(store.memoryFor('DEMO1', '2026-10-15T00:00:00Z').length, 0);
-  assert.equal(await reviewClosed({ store, settings: DEFAULT_SETTINGS, day, scores: [scoreRow('DEMO2')], runner: async () => { throw new Error('boom'); }, log }), 0);
+  assert.equal(await reviewClosed({ store, settings: DEFAULT_SETTINGS, day, scores: [], expertState: closedState('DEMO2'), runner: async () => { throw new Error('boom'); }, log }), 0);
   const empty = new Store(':memory:'); t.after(() => empty.close());
-  await assert.rejects(reviewClosed({ store: empty, settings: DEFAULT_SETTINGS, day, scores: [scoreRow('DEMO1')], runner: bad, replay: true, log }), { code: 'REPLAY_MISS' });
+  await assert.rejects(reviewClosed({ store: empty, settings: DEFAULT_SETTINGS, day, scores: [], expertState: closedState('DEMO1'), runner: bad, replay: true, log }), { code: 'REPLAY_MISS' });
   const capped = { ...DEFAULT_SETTINGS, model: { ...DEFAULT_SETTINGS.model, dailyCallLimit: 0 } };
-  assert.equal(await reviewClosed({ store, settings: capped, day, scores: [scoreRow('DEMO3')], runner: bad, log }), 0);
+  assert.equal(await reviewClosed({ store, settings: capped, day, scores: [], expertState: closedState('DEMO3'), runner: bad, log }), 0);
   assert.match(logs.at(-1), /Daily AI call limit/);
+});
+
+// Three sessions (14, 15, 16 Oct 2026), two bars each: 09:30 and 15:30 IST.
+const mdata = ['2026-10-14', '2026-10-15', '2026-10-16'].flatMap((d, i) => [['09:30', [100 + i, 101 + i, 99 + i, 100 + i]], ['15:30', [100 + i, 103 + i, 98 + i * 2, 101 + i]]]
+  .map(([time, [open, high, low, close]]) => ({ timestamp: new Date(`${d}T${time}:00+05:30`).toISOString(), bars: { DEMO1: { open, high, low, close } } })));
+const mdecision = { id: 'm1', symbol: 'DEMO1', trigger: 'entry', timestamp: mdata[0].timestamp, executionTimestamp: mdata[1].timestamp, action: 'BUY', expert: { action: 'enter', reason: 'multi', invalidation: { priceBelow: 90 } } };
+const mscore = day => scoreDecisions({ expertState: { dataset: mdata, decisions: [mdecision], trades: [] }, rulesState: { trades: [] }, day, thesisFor: () => sthesis({ invalidation: { priceBelow: 90 }, expectedHoldSessions: 3 }) });
+
+test('a 3-session decision stays open after day 1 and resolves on day 3 over its full window', () => {
+  const [d1] = mscore('2026-10-14'), [d2] = mscore('2026-10-15'), [d3] = mscore('2026-10-16');
+  assert.equal(d1.thesisScore, 'open'); assert.equal(d2.thesisScore, 'open');
+  assert.equal(d1.mfe, 3); assert.equal(d1.mae, -2); // day 1 only: reference 100, high 103, low 98
+  assert.equal(d3.thesisScore, 'held'); assert.equal(d3.mfe, 5); assert.equal(d3.mae, -2); // reference 100; day 3 high 105; day 3 low 102, day 1 low 98
+  assert.deepEqual(mscore('2026-10-17'), []); // 17 Oct is a Saturday and the window ended on the 16th: nothing left to score
+});
+
+test('a position entered on day 1 and stopped out on day 2 with no day-2 decision gets exactly one review on day 2', async t => {
+  const store = new Store(':memory:'); t.after(() => store.close());
+  const expertState = { dataset: mdata, decisions: [mdecision], trades: [{ ...rtrade('DEMO1', 'BUY', 0), timestamp: mdata[1].timestamp }, { ...rtrade('DEMO1', 'SELL', 0, -2), timestamp: mdata[2].timestamp }] };
+  const thesisFor = () => sthesis({ invalidation: { priceBelow: 90 }, expectedHoldSessions: 3 }), calls = [];
+  const args = day => ({ store, settings: DEFAULT_SETTINGS, day, expertState, runner: okRunner(calls),
+    scores: scoreDecisions({ expertState, rulesState: { trades: [] }, day, thesisFor }) });
+  assert.equal(await reviewClosed(args('2026-10-14')), 0);
+  const day2 = args('2026-10-15');
+  assert.equal(day2.scores.length, 1); // the day-1 decision is still being scored on day 2, and no day-2 decision exists
+  assert.equal(await reviewClosed(day2), 1);
+  assert.equal(calls.length, 1); assert.equal(JSON.parse(calls[0].input).decisions[0].score.decisionId, 'm1');
+  assert.equal(store.memoryFor('DEMO1', '2026-10-15T10:00:00Z').length, 1);
 });
 
 const srow = (n, { rules = {}, expert = {}, flagged = false, scores = [], suppressions = [], coverage = 3, cost = 0.5 } = {}) => ({
@@ -375,7 +422,7 @@ test('scorecard computes exit bar', () => {
     scoreRow('D', { action: 'abstain', thesisScore: 'expired', rulesSameWindow: { entered: true, realised: -2 } })] : [], suppressions: i < 2 ? [{ symbol: 'A', cause: 'x' }] : [], coverage: i === 3 ? 2 : 3 }));
   const card = scorecard({ reports: rows });
   assert.equal(card.sessions, 40); assert.equal(card.expertNet, 800); assert.equal(card.rulesNet, 400); assert.equal(card.buyHoldNet, 400 - 200);
-  assert.equal(card.exitBarMet, true); assert.equal(card.thesisAccuracy, 1 / 3); assert.equal(card.abstentionValue, -2);
+  assert.equal(card.exitBarMet, true); assert.equal(card.thesisAccuracy, 1 / 3); assert.equal(card.unresolvedTheses, 1); assert.equal(card.abstentionValue, -2);
   assert.equal(card.suppressedCalls, 2); assert.equal(card.missingCoverageSessions, 1); assert.equal(card.modelCostUsdEstimate, 20);
   assert.equal(scorecard({ reports: rows.slice(0, 39) }).exitBarMet, false);
   const behind = rows.map(r => ({ ...r, expert: { ...r.expert, netAfterFixedCosts: 5 * Number(r.day.slice(-2)) } }));
@@ -386,7 +433,24 @@ test('scorecard excludes flagged sessions by increments and handles no data', ()
   const rows = [srow(1), srow(2, { flagged: true }), srow(3)];
   const card = scorecard({ reports: rows });
   assert.equal(card.sessions, 2); assert.equal(card.expertNet, 20 + 20); assert.equal(card.rulesNet, 10 + 10);
-  assert.deepEqual(scorecard({ reports: [] }), { sessions: 0, expertNet: 0, rulesNet: 0, buyHoldNet: 0, thesisAccuracy: null, abstentionValue: 0, suppressedCalls: 0, missingCoverageSessions: 0, modelCostUsdEstimate: 0, exitBarMet: false });
+  assert.deepEqual(scorecard({ reports: [] }), { sessions: 0, expertNet: 0, rulesNet: 0, buyHoldNet: 0, thesisAccuracy: null, unresolvedTheses: 0, abstentionValue: 0, suppressedCalls: 0, missingCoverageSessions: 0, modelCostUsdEstimate: 0, exitBarMet: false });
+});
+
+test('scorecard measures rules and buy-and-hold from the rules report before the first paired session', () => {
+  const leading = [1, 2].map(n => ({ day: `2026-10-0${n}`, rules: { netAfterFixedCosts: -5000, equity: 5000, benchmarkEquity: 5000, dataQuality: { flagged: false } }, expert: null }));
+  const paired = [1, 2].map(n => ({ day: `2026-10-1${n}`, rules: { netAfterFixedCosts: -5000 + 10 * n, equity: 5000 + 10 * n, benchmarkEquity: 5000 + 5 * n, dataQuality: { flagged: false } },
+    expert: { netAfterFixedCosts: 20 * n, expert: { scores: [], suppressions: [], coverage: 3, universe: 3, costUsd: 0 } } }));
+  const card = scorecard({ reports: [...leading, ...paired] });
+  assert.equal(card.sessions, 2); assert.equal(card.rulesNet, 20); assert.equal(card.buyHoldNet, 10); assert.equal(card.expertNet, 40);
+});
+
+test('scorecard counts a decision scored on several days once, by its latest score', () => {
+  const x = over => scoreRow('X', { action: 'abstain', ...over });
+  const rows = [srow(1, { scores: [x({ thesisScore: 'open', rulesSameWindow: { entered: true, realised: 1 } })] }),
+    srow(2, { scores: [x({ thesisScore: 'open', rulesSameWindow: { entered: true, realised: 3 } }), scoreRow('Y', { thesisScore: 'open' })] }),
+    srow(3, { scores: [x({ thesisScore: 'held', rulesSameWindow: { entered: true, realised: 4 } })] })];
+  const card = scorecard({ reports: rows });
+  assert.equal(card.thesisAccuracy, 1); assert.equal(card.unresolvedTheses, 1); assert.equal(card.abstentionValue, 4);
 });
 
 test('makeScoring scores, reviews and writes the expert report with extras', async t => {
@@ -402,7 +466,7 @@ test('makeScoring scores, reviews and writes the expert report with extras', asy
   const out = await scoring(day, { flagged: false });
   assert.equal(reports.length, 1); assert.deepEqual(reports[0].q, { flagged: false }); assert.equal(out, reports[0].extra);
   const { scores, theses, calls, costUsd, coverage, universe, suppressions } = out.expert;
-  assert.equal(scores.length, 1); assert.equal(scores[0].closedOnDay, true); assert.equal(theses.DEMO1.stance, 'candidate');
+  assert.equal(scores.length, 1); assert.equal(theses.DEMO1.stance, 'candidate');
   // The review row is stamped with wall-clock time, so only the entry row (stamped on `day`) is counted here.
   assert.deepEqual(calls.byTrigger, { entry: 1 }); assert.equal(calls.count, 1); assert.equal(costUsd, 0.25);
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM model_outputs WHERE trigger='review'").get().n, 1);

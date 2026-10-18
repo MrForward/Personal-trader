@@ -262,44 +262,57 @@ const round2 = value => Math.round(value * 100) / 100;
 const closeOf = day => Date.parse(`${day}T15:30:00+05:30`);
 
 /**
- * Pure. Scores the trigger-driven decisions made on `day`: the window runs `expectedHoldSessions` sessions from the decision's next open, cut at `day`'s close.
+ * Pure. Scores every trigger-driven decision whose window includes `day`: the window runs `expectedHoldSessions` sessions from the decision's next open
+ * (thesis of the decision's own day via `thesisFor(symbol, day)`), cut at `day`'s close. Decisions whose window ended earlier were resolved on their last day.
  * `held` = window ended, never invalidated, last close at or above the reference open; `expired` = ended without that; `open` = window runs past `day`.
  */
-export function scoreDecisions({ expertState, rulesState, day, theses = {} }) {
+export function scoreDecisions({ expertState, rulesState, day, thesisFor = () => null }) {
   const dayClose = closeOf(day);
   const within = (trades, symbol, from, to, action) => trades.filter(t => t.symbol === symbol && t.action === action && Date.parse(t.timestamp) >= from && Date.parse(t.timestamp) <= to);
-  return expertState.decisions.filter(d => d.trigger && istDay.format(Date.parse(d.timestamp)) === day).map(d => {
-    const thesis = theses[d.symbol], from = Date.parse(d.executionTimestamp);
+  return expertState.decisions.filter(d => d.trigger && istDay.format(Date.parse(d.timestamp)) <= day).flatMap(d => {
+    const thesis = thesisFor(d.symbol, istDay.format(Date.parse(d.timestamp))), from = Date.parse(d.executionTimestamp);
     let naturalEnd = sessionFor(from)?.closeMs ?? from;
     for (let left = (thesis?.expectedHoldSessions ?? 1) - 1; left > 0;) { naturalEnd += DAY_MS; if (sessionFor(naturalEnd)) left--; }
+    if (naturalEnd < dayClose) return [];
     const to = Math.min(naturalEnd, dayClose);
     const bars = expertState.dataset.filter(row => Date.parse(row.timestamp) >= from && Date.parse(row.timestamp) <= to && row.bars[d.symbol]).map(row => row.bars[d.symbol]);
     const reference = bars[0]?.open, level = thesis?.invalidation?.priceBelow ?? d.expert?.invalidation?.priceBelow;
     const invalidationHit = level != null && bars.some(bar => bar.low <= level);
     const realisedBy = state => sum(within(state.trades, d.symbol, from, to, 'SELL').map(t => t.realizedPnl));
-    return { decisionId: d.id, symbol: d.symbol, trigger: d.trigger, action: d.expert?.action ?? d.action, reason: d.expert?.reason ?? d.reason, invalidationHit,
+    return [{ decisionId: d.id, symbol: d.symbol, trigger: d.trigger, action: d.expert?.action ?? d.action, reason: d.expert?.reason ?? d.reason, invalidationHit,
       mfe: bars.length ? round2((Math.max(...bars.map(b => b.high)) / reference - 1) * 100) : null,
       mae: bars.length ? round2((Math.min(...bars.map(b => b.low)) / reference - 1) * 100) : null,
       realised: realisedBy(expertState),
       rulesSameWindow: { entered: within(rulesState.trades, d.symbol, from, to, 'BUY').length > 0, realised: realisedBy(rulesState) },
-      thesisScore: invalidationHit ? 'invalidated' : !bars.length || naturalEnd > dayClose ? 'open' : bars.at(-1).close >= reference ? 'held' : 'expired',
-      closedOnDay: expertState.trades.some(t => t.symbol === d.symbol && t.action === 'SELL' && istDay.format(Date.parse(t.timestamp)) === day) };
+      thesisScore: invalidationHit ? 'invalidated' : !bars.length || naturalEnd > dayClose ? 'open' : bars.at(-1).close >= reference ? 'held' : 'expired' }];
   });
 }
 
-/** One review call per symbol with a position closed on `day`, through the same recorded/guarded path as decisions. Returns the memories newly written. */
-export async function reviewClosed({ store, settings, day, scores, runner = runClaudeCode, replay = false, engineName = 'expert', promptDir = PROMPT_DIR, log = message => process.stderr.write(`${redact(message)}\n`) }) {
+/**
+ * One review call per expert position closed (a SELL) on `day`, whatever closed it, through the same recorded/guarded path as decisions.
+ * The input is the position's decision chain (entry to close) with the scores available today. Returns the memories newly written.
+ */
+export async function reviewClosed({ store, settings, day, scores, expertState, runner = runClaudeCode, replay = false, engineName = 'expert', promptDir = PROMPT_DIR, log = message => process.stderr.write(`${redact(message)}\n`) }) {
   const prompt = loadPrompt(promptDir, 'review', REVIEW_SCHEMA);
   const reviewedAt = new Date(closeOf(day)).toISOString(); // the session close, so a lesson is invisible to every decision at or before it
+  const open = new Map(), closed = [];
+  for (const trade of expertState.trades) { // trades are in execution order and a symbol holds one position at a time
+    if (trade.action === 'BUY') open.set(trade.symbol, trade);
+    else if (trade.action === 'SELL' && istDay.format(Date.parse(trade.timestamp)) === day && open.has(trade.symbol)) closed.push({ entry: open.get(trade.symbol), exit: trade });
+  }
   let written = 0;
-  for (const symbol of new Set(scores.filter(score => score.closedOnDay).map(score => score.symbol))) {
-    const request = { symbol, day, thesis: store.thesis(symbol, day), decisions: scores.filter(score => score.symbol === symbol) };
-    const row = { key: [engineName, symbol, 'review', reviewedAt, prompt.hash].join('|'), engine: engineName, symbol, trigger: 'review', asOf: reviewedAt, promptHash: prompt.hash };
+  for (const { entry, exit } of closed) {
+    const symbol = entry.symbol, enteredAt = entry.timestamp, closedAt = exit.timestamp;
+    const chain = expertState.decisions.filter(d => d.symbol === symbol && d.trigger && Date.parse(d.executionTimestamp) >= Date.parse(enteredAt) && Date.parse(d.executionTimestamp) <= Date.parse(closedAt))
+      .map(d => ({ trigger: d.trigger, action: d.expert?.action ?? d.action, reason: d.expert?.reason ?? d.reason, score: scores.find(score => score.decisionId === d.id) ?? null }));
+    const request = { symbol, day, enteredAt, closedAt, realised: exit.realizedPnl, thesis: store.thesis(symbol, istDay.format(Date.parse(enteredAt))), decisions: chain };
+    // Entry and close times, not trade ids (random per run), keep the key identical on replay and distinct per position.
+    const row = { key: [engineName, symbol, 'review', `${enteredAt}~${closedAt}`, prompt.hash].join('|'), engine: engineName, symbol, trigger: 'review', asOf: reviewedAt, promptHash: prompt.hash };
     try {
       const { value } = await recorded({ store, replay, row, live: () => callModel({ store, settings, runner, prompt, schema: REVIEW_SCHEMA, model: settings.expert.researchModel, request,
         validate: value => { checkShape(value, REVIEW_SCHEMA, 'Review'); return value; } }) });
-      if (store.memoryFor(symbol, reviewedAt).some(memory => memory.reviewedAt === reviewedAt)) continue; // already written by an earlier run
-      store.saveMemory(symbol, reviewedAt, value); written++;
+      if (store.memoryFor(symbol, reviewedAt).some(memory => memory.enteredAt === enteredAt && memory.closedAt === closedAt)) continue; // written by an earlier run
+      store.saveMemory(symbol, reviewedAt, { ...value, enteredAt, closedAt }); written++;
     } catch (error) {
       if (['REPLAY_MISS', 'PERSISTENCE_ERROR', 'STALE_STATE'].includes(error.code)) throw error;
       log(`Review for ${symbol} failed: ${error.message}`);
@@ -316,8 +329,8 @@ export function makeScoring({ expertEngine, rulesEngine, runner, replay = false,
   return async (day, dataQuality) => {
     const { store, state } = expertEngine, settings = state.settings;
     const theses = store.thesesFor(day);
-    const scores = scoreDecisions({ expertState: state, rulesState: rulesEngine.state, day, theses });
-    await reviewClosed({ store, settings, day, scores, runner, replay, ...(log && { log }) });
+    const scores = scoreDecisions({ expertState: state, rulesState: rulesEngine.state, day, thesisFor: (symbol, thesisDay) => store.thesis(symbol, thesisDay) });
+    await reviewClosed({ store, settings, day, scores, expertState: state, runner, replay, ...(log && { log }) });
     const calls = store.callsFor(day);
     const covered = new Set(state.intelligenceRecords?.filter(r => istDay.format(Date.parse(r.firstReceivedAt)) === day).map(r => r.symbol));
     const suppressions = state.decisions.filter(d => istDay.format(Date.parse(d.timestamp)) === day && d.outcome?.startsWith('Suppressed:'))
@@ -326,26 +339,33 @@ export function makeScoring({ expertEngine, rulesEngine, runner, replay = false,
   };
 }
 
-/** Phase 1b scorecard over `[{ day, rules, expert }]`. Reports hold cumulative net figures, so sessions add their day-on-day change; flagged data-quality sessions are left out. */
+/**
+ * Phase 1b scorecard over `[{ day, rules, expert }]`. Reports hold cumulative net figures, so sessions add their day-on-day change. Rules and buy-and-hold are measured
+ * from the rules report just before the first paired session (rules-only history moves the baseline, not the totals); the expert from its own start.
+ * Flagged data-quality sessions are left out. A decision scored on several days counts once, by its latest score.
+ */
 export function scorecard({ reports }) {
-  const card = { sessions: 0, expertNet: 0, rulesNet: 0, buyHoldNet: 0, thesisAccuracy: null, abstentionValue: 0, suppressedCalls: 0, missingCoverageSessions: 0, modelCostUsdEstimate: 0 };
-  let before = { expert: 0, rules: 0, buyHold: 0 }, decided = 0, held = 0;
+  const card = { sessions: 0, expertNet: 0, rulesNet: 0, buyHoldNet: 0, thesisAccuracy: null, unresolvedTheses: 0, abstentionValue: 0, suppressedCalls: 0, missingCoverageSessions: 0, modelCostUsdEstimate: 0 };
+  const before = { expert: 0, rules: 0, buyHold: 0 }, latest = new Map();
   for (const { rules, expert } of reports) {
-    if (!rules || !expert) continue;
-    const now = { expert: expert.netAfterFixedCosts, rules: rules.netAfterFixedCosts, buyHold: rules.netAfterFixedCosts + rules.benchmarkEquity - rules.equity };
-    if (!rules.dataQuality?.flagged) {
+    const now = {};
+    if (rules) now.rules = rules.netAfterFixedCosts, now.buyHold = rules.netAfterFixedCosts + rules.benchmarkEquity - rules.equity;
+    if (expert) now.expert = expert.netAfterFixedCosts;
+    if (rules && expert && !rules.dataQuality?.flagged) {
       card.sessions++;
       for (const key of ['expert', 'rules', 'buyHold']) card[`${key}Net`] += now[key] - before[key];
-      const extra = expert.expert ?? {}, scores = extra.scores ?? [];
-      for (const score of scores) if (score.thesisScore !== 'open') { decided++; if (score.thesisScore === 'held') held++; }
-      card.abstentionValue += sum(scores.filter(score => score.action === 'abstain').map(score => score.rulesSameWindow.realised));
+      const extra = expert.expert ?? {};
+      for (const score of extra.scores ?? []) latest.set(score.decisionId, score);
       card.suppressedCalls += extra.suppressions?.length ?? 0;
       if (extra.coverage < extra.universe) card.missingCoverageSessions++;
       card.modelCostUsdEstimate += extra.costUsd ?? 0;
     }
-    before = now;
+    Object.assign(before, now);
   }
+  const scores = [...latest.values()], resolved = scores.filter(score => score.thesisScore !== 'open');
+  card.abstentionValue = sum(scores.filter(score => score.action === 'abstain').map(score => score.rulesSameWindow.realised));
+  card.unresolvedTheses = scores.length - resolved.length;
+  card.thesisAccuracy = resolved.length ? resolved.filter(score => score.thesisScore === 'held').length / resolved.length : null; // unresolved decisions are counted separately
   for (const key of ['expertNet', 'rulesNet', 'buyHoldNet', 'abstentionValue', 'modelCostUsdEstimate']) card[key] = round2(card[key]);
-  card.thesisAccuracy = decided ? held / decided : null; // open theses are undecided, so they count in neither side
   return { ...card, exitBarMet: card.sessions >= 40 && card.expertNet > card.rulesNet && card.expertNet > card.buyHoldNet };
 }
