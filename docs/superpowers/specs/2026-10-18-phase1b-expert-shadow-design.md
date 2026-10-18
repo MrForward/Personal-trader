@@ -86,7 +86,7 @@ Expected volume: 10 theses plus 5–15 decisions per session.
 
 ### What the engine enforces
 
-Engine gains one optional constructor option, `decider`. When present, `step()` calls it instead of the reviewer/`evaluateStrategy` path for symbols without a held rules-strategy position, and for held positions whose `strategyId` is `expert`. Everything else in `step()` is unchanged:
+Engine gains one optional constructor option, `decider`. When present, `step()` calls it instead of the reviewer/`evaluateStrategy` path for every symbol; every position Engine B opens carries `strategyId: expert`. Everything else in `step()` is unchanged:
 
 - **Sizing** is the existing deterministic code. The decider never supplies a quantity.
 - **Stops**: initial stop and target come from risk settings exactly as today. `tightenStopTo` is applied only if it is higher than the current stop, through the existing logged stop-update path with prior/new values and reason (R-005). A lower value is rejected and recorded as `Rejected: stop widening`.
