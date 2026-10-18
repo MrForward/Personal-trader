@@ -72,8 +72,16 @@ test('isAnomaly on range and volume', () => {
   assert.equal(isAnomaly(bar(101.5, 99, 1000), history, daily), true);   // range 2.5 > 2 x ~1
   assert.equal(isAnomaly(bar(100.5, 99.5, 4600), history, daily), true); // volume > 3 x 1500
   assert.equal(isAnomaly(bar(100.5, 99.5, 4400), history, daily), false);
-  assert.equal(isAnomaly(bar(101.5, 99, 9999), history.slice(0, 10), daily), false);
-  assert.equal(isAnomaly(bar(100.5, 99.5, 99999), history.slice(0, 10), daily), false);
+  assert.equal(isAnomaly(bar(101.5, 99, 1000), history.slice(0, 10), daily), false); // range alone: false on short history
+  assert.equal(isAnomaly(bar(100.5, 99.5, 4600), history.slice(0, 10), daily), true); // volume stands on its own
   assert.equal(isAnomaly(bar(100.5, 99.5, 99999), history, daily.slice(0, 19)), false);
   assert.equal(isAnomaly(bar(100.5, 99.5, 9001), history, daily, 30), true); // 30-min bars: 3000 each, 3x = 9000
+});
+
+test('MARKET call allows primary sourceKind and uses the same tools and maxTurns as a symbol call', async () => {
+  const a = [], b = [];
+  await researchMarket({ now: NOW, settings: DEFAULT_SETTINGS, runner: fakeRunner({ records: [], coverageNote: 'n' }, a) });
+  await run([], { runner: fakeRunner({ records: [], coverageNote: 'n' }, b) });
+  assert.deepEqual(a[0].schema.properties.records.items.properties.sourceKind.enum, ['primary', 'calendar', 'news']);
+  assert.deepEqual([a[0].tools, a[0].maxTurns], [b[0].tools, 3]);
 });

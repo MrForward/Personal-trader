@@ -14,6 +14,7 @@ Resolve the company name, exchange symbol and event date before attaching an ite
 - `publishedAt`: the time the source itself states, ISO 8601 with timezone (IST is +05:30). If the source states no publication time, omit the record. Never guess it and never use the current time. It must not be after `nowIst`.
 - `eventAt`: when the event happens or happened, if the source states it. Include scheduled future events here. Omit if unknown.
 - `sourceKind`: `primary` (exchange, regulator, or the company itself), `news`, or `calendar` (scheduled events). Do not use `social`, `synthetic` or `other`.
+- For MARKET, `sourceKind` may be `primary` (RBI, SEBI, NSE releases), `calendar` or `news`.
 - `content`: a faithful, neutral summary of at most 1000 characters. Keep attribution and qualifiers ("according to...", "said to be", "denied by...").
 - `sourceUrl`: the HTTPS URL of the source you read on an allowed domain.
 

@@ -24,7 +24,7 @@ const schemaFor = kinds => ({
   },
 });
 export const RESEARCH_SCHEMA = schemaFor(SOURCE_KINDS.filter(kind => kind !== 'synthetic'));
-const MARKET_SCHEMA = schemaFor(['calendar', 'news']);
+const MARKET_SCHEMA = schemaFor(['primary', 'calendar', 'news']);
 
 const onList = (sourceUrl, domains) => {
   try { const host = new URL(sourceUrl).hostname.toLowerCase(); return domains.some(d => host === d || host.endsWith(`.${d}`)); } catch { return false; }
@@ -59,10 +59,9 @@ export const researchSymbol = ({ symbol, companyName, now, settings, runner = ru
 export const researchMarket = ({ now, settings, runner = runClaudeCode }) =>
   collect({ symbol: 'MARKET', extra: {}, now, settings, schema: MARKET_SCHEMA, runner });
 
-/** Range beyond 2 ATR, or volume beyond 3x the typical bar (20-day mean daily volume spread over the session's bars). False without enough history. */
+/** Range beyond 2 ATR, or volume beyond 3x the typical bar (20-day mean daily volume spread over the session's bars). Range needs 25+ bars of history; volume needs 20+ daily bars. */
 export function isAnomaly(bar, history, dailyBars, barMinutes = 15) {
-  if (history.length < WARMUP_BARS) return false;
-  if (bar.high - bar.low > 2 * analyzeMarket(history).atr) return true;
+  if (history.length >= WARMUP_BARS && bar.high - bar.low > 2 * analyzeMarket(history).atr) return true;
   if (dailyBars.length < 20) return false;
   const mean = dailyBars.slice(-20).reduce((sum, day) => sum + day.volume, 0) / 20;
   return bar.volume > 3 * (mean / (SESSION_MINUTES / barMinutes));
