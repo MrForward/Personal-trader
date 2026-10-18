@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApplication } from '../src/server.mjs';
@@ -164,6 +164,22 @@ test('with the expert book disabled nothing expert is built: no store file, no b
   assert.ok(!readdirSync(dir).some(name => name.includes('-expert')), readdirSync(dir).join(', '));
   const kite = await kiteWorkspace(t);
   assert.equal(kite.app.runner.expert, null);
+});
+
+test('a corrupt expert database at startup halts only the expert book; the rules server still starts', async t => {
+  const { dbPath } = seededDb(t);
+  writeFileSync(dbPath.replace(/\.sqlite$/, '-expert.sqlite'), 'this is not a sqlite database');
+  const errors = []; const write = process.stderr.write; process.stderr.write = chunk => { errors.push(String(chunk)); return true; };
+  let app;
+  try { app = createApplication({ dbPath, port: 0, autoStepMs: 0 }); } finally { process.stderr.write = write; }
+  const { base } = await workspace(t, app);
+  assert.equal(app.expertEngine, null); assert.equal(app.expertStore, null);
+  assert.match(errors.join(''), /Expert book unavailable/);
+  const state = await fetch(base + '/api/state');
+  assert.equal(state.status, 200);
+  const body = await state.json();
+  assert.equal(body.expert.enabled, true); assert.equal(body.expert.book, null); assert.match(body.expert.error, /Expert book unavailable/);
+  assert.equal((await (await fetch(base + '/api/reports')).json()).length, 0);
 });
 
 test('an expert read that throws never fails or alters a rules response', async t => {

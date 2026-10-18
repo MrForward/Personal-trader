@@ -298,6 +298,8 @@ export async function runClaudeCode({ model, systemPrompt, input, schema, tools 
     '--tools', [...new Set(tools.map((tool) => tool.replace(/\(.*$/, '')))].join(','), ...(tools.length ? ['--allowedTools', ...tools] : [])];
   // FAKE_CLAUDE_* lets tests steer tests/fixtures/fake-claude.mjs; real runs never set them.
   const picked = Object.fromEntries(Object.entries(env).filter(([k]) => ['PATH', 'HOME', 'LANG', 'CLAUDE_CODE_OAUTH_TOKEN'].includes(k) || k.startsWith('FAKE_CLAUDE_')));
+  // Without the token the CLI falls back to whatever login the host has (or none); fail clearly instead.
+  if (!picked.CLAUDE_CODE_OAUTH_TOKEN?.trim()) throw modelError('MODEL_EXIT', 'CLAUDE_CODE_OAUTH_TOKEN is not configured; run `claude setup-token` and add it to the env file.');
   // A fresh empty working directory per call, so the child can see no project or home files.
   const cwd = mkdtempSync(join(tmpdir(), 'claude-run-'));
   const { stdout, stderr, code } = await new Promise((resolve, reject) => {

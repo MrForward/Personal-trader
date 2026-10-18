@@ -76,10 +76,10 @@ export function createApplication({
   });
   // Phase 1b expert book: its own store and engine, built only when expert.enabled is true at startup, so a disabled book cannot touch the rules path.
   const expertOn = engine.state.settings.expert.enabled === true;
-  let expertStore = null, expertEngine = null, expertBook = null;
+  let expertStore = null, expertEngine = null, expertBook = null, expertStartError = null;
   // Both books share every setting (spec §2); the expert engine keeps its own version counter.
   const withoutVersion = ({ version: _version, ...rest }) => rest;
-  if (expertOn) {
+  if (expertOn) try {
     expertStore = new Store(expertDbPath);
     const expertIntelligence = ({ symbol, asOf }) => intelligenceContext({ records: expertEngine?.state.intelligenceRecords ?? [], symbol, asOf });
     // Read through to the expert engine so settings changes reach the decider without a restart.
@@ -104,6 +104,12 @@ export function createApplication({
       intelligenceFor: (symbol, at) => expertIntelligence({ symbol, asOf: at }) });
     const scoring = makeScoring({ expertEngine, rulesEngine: engine, runner: modelRunner });
     expertBook = { engine: expertEngine, decider, research, theses, scoring };
+  } catch (error) {
+    // An expert-only fault (e.g. a corrupt -expert.sqlite) must not take the rules book down.
+    try { expertStore?.close(); } catch { /* keep the original error */ }
+    expertStore = null; expertEngine = null; expertBook = null;
+    expertStartError = `Expert book unavailable: ${publicError(error)}`;
+    process.stderr.write(`${expertStartError}\n`);
   }
   // One writer: requests and replay ticks cannot race settings, state or the cursor.
   let queue = Promise.resolve();
@@ -131,7 +137,8 @@ export function createApplication({
     const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
     value.expert = { enabled: false, book: null, theses: {}, runner: null };
     // An expert read that fails is reported beside the rules state, never instead of it.
-    if (expertOn) {
+    if (expertStartError) value.expert = { enabled: true, book: null, theses: {}, runner: null, error: expertStartError };
+    else if (expertOn) {
       try { value.expert = { enabled: true, book: expertEngine.snapshot(), theses: expertStore.thesesFor(today), runner: runner?.status().expert ?? null }; }
       catch (error) { value.expert = { enabled: true, book: null, theses: {}, runner: null, error: publicError(error) }; }
     }
@@ -139,7 +146,7 @@ export function createApplication({
   };
   const reports = () => {
     let expertByDay = new Map();
-    if (expertOn) {
+    if (expertStore) {
       try { expertByDay = new Map(expertStore.dailyReports().map(report => [report.day, report])); }
       catch (error) { process.stderr.write(`Expert reports unavailable: ${publicError(error)}\n`); }
     }

@@ -224,8 +224,15 @@ test('timeout covers a response body that stalls after headers arrive', async ()
 
 const FAKE = fileURLToPath(new URL('./fixtures/fake-claude.mjs', import.meta.url));
 const ccSchema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false };
-const ccRun = (mode, extra = {}, envExtra = {}) => runClaudeCode({ model: 'claude-opus-5-5', systemPrompt: 'x', input: '', schema: ccSchema, binary: FAKE, env: { FAKE_CLAUDE_MODE: mode, PATH: process.env.PATH, ...envExtra }, ...extra });
+const ccRun = (mode, extra = {}, envExtra = {}) => runClaudeCode({ model: 'claude-opus-5-5', systemPrompt: 'x', input: '', schema: ccSchema, binary: FAKE, env: { FAKE_CLAUDE_MODE: mode, PATH: process.env.PATH, CLAUDE_CODE_OAUTH_TOKEN: 'test-oauth-token-not-real', ...envExtra }, ...extra });
 const ccArgv = async (extra = {}) => (await ccRun('argv', { schema: { type: 'object' }, ...extra })).value;
+
+test('claude-code: a missing subscription token fails at once without spawning the CLI', async () => {
+  let spawned = false;
+  await assert.rejects(runClaudeCode({ model: 'm', systemPrompt: 'x', input: '', schema: ccSchema, env: { PATH: process.env.PATH }, spawnImpl: () => { spawned = true; throw new Error('should not spawn'); } }),
+    e => e.code === 'MODEL_EXIT' && /CLAUDE_CODE_OAUTH_TOKEN/.test(e.message));
+  assert.equal(spawned, false);
+});
 
 test('claude-code: success returns validated value, usage and cost', async () => {
   const r = await ccRun('ok', { input: '{"a":1}' }, { FAKE_CLAUDE_OUTPUT: '{"ok":true}' });
