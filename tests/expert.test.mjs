@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { DEFAULT_SETTINGS } from '../src/config.mjs';
 import { SECTOR_INDEX, buildContextPack, makeDecider, makeScoring, reviewClosed, runTheses, scoreDecisions, scorecard, triggerFor, validateDecision, validateThesis } from '../src/expert.mjs';
 import { Store } from '../src/store.mjs';
+import { intelligenceContext } from '../src/intelligence.mjs';
 
 // 15-minute bars ending 09:30..15:30 IST on 13 and 14 October 2026.
 const dataset = [];
@@ -56,6 +57,27 @@ test('context pack memory only includes reviews at or before asOf', () => {
 
 test('context pack rejects packs over 60000 characters', () => {
   assert.throws(() => buildContextPack({ ...fixture, thesis: { stance: 'watch', thesis: 'x'.repeat(70000) } }), /60000/);
+});
+
+// A MARKET calendar record (RBI policy), captured at 08:31 IST on the 14th.
+const rbi = { id: 'MARKET:rbi000000001', symbol: 'MARKET', origin: 'RBI policy date', publishedAt: '2026-10-13T12:00:00.000Z', firstReceivedAt: '2026-10-14T03:01:00.000Z',
+  analysisReadyAt: '2026-10-14T03:01:00.000Z', eventAt: '2026-10-21T04:30:00.000Z', sourceKind: 'calendar', verificationStatus: 'primary-confirmed', content: 'RBI policy decision on 21 Oct.', sourceUrl: 'https://www.rbi.org.in/p', version: 1 };
+const marketNews = { ...rbi, id: 'MARKET:news00000001', origin: 'FII flows', sourceKind: 'news', verificationStatus: 'reported', content: 'FIIs sold.', sourceUrl: 'https://www.reuters.com/f' };
+const marketAt = asOfIso => intelligenceContext({ records: [rbi, marketNews], symbol: 'MARKET', asOf: asOfIso });
+
+test('I3: MARKET evidence reaches a stock pack, cut at asOf; its calendar claims join calendar.events', () => {
+  const pack = buildContextPack({ ...fixture, market: marketAt(fixture.asOf) });
+  assert.deepEqual(pack.evidence.market.map(c => c.recordId), [marketNews.id]);
+  assert.deepEqual(pack.calendar.events.map(c => c.recordId), ['event', rbi.id]);
+  const early = buildContextPack({ ...fixture, asOf: '2026-10-14T03:00:00Z', market: { claims: marketAt(fixture.asOf).claims } });
+  assert.deepEqual([early.evidence.market, early.calendar.events.map(c => c.recordId)], [[], []]);
+});
+
+test('I3: an oversize pack keeps the 20 most recent market claims before giving up', () => {
+  const claims = Array.from({ length: 30 }, (_, i) => ({ ...claim(`MARKET:m${String(i).padStart(2, '0')}`, '2026-10-14T03:00:00Z'), publishedAt: new Date(Date.parse('2026-10-13T00:00:00Z') + i * 60_000).toISOString(), content: 'x'.repeat(2000) }));
+  const pack = buildContextPack({ ...fixture, market: { claims } });
+  assert.equal(pack.evidence.market.length, 20); assert.ok(pack.evidence.market.every(c => c.recordId >= 'MARKET:m10'));
+  assert.throws(() => buildContextPack({ ...fixture, market: { claims: claims.map(c => ({ ...c, content: 'x'.repeat(4000) })) } }), /60000/);
 });
 
 test('unmapped symbol gets null sector index', () => {
@@ -249,6 +271,21 @@ test('runTheses stops the pass at a subscription limit and suppresses at the cal
   assert.deepEqual(store.thesis('DEMO3', day), { stance: 'watch', invalid: 'Daily AI call limit reached', createdAt: thesisAsOf });
   await runTheses({ ...base, symbols: ['DEMO4'], intelligenceFor: () => ({ claims: [claim('big', '2026-10-14T03:00:00Z')].map(c => ({ ...c, content: 'x'.repeat(70000) })) }), runner: () => assert.fail('runner called on an oversize pack') });
   assert.deepEqual(store.thesis('DEMO4', day), { stance: 'watch', invalid: 'Context pack too large', createdAt: thesisAsOf });
+});
+
+test('I3: theses and decisions can cite a MARKET calendar record', async t => {
+  const store = new Store(':memory:'); t.after(() => store.close());
+  const seen = [], value = { ...goodThesis, evidenceIds: [rbi.id] };
+  const runner = async args => { seen.push(JSON.parse(args.input).contextPack); return { value, usage: { inputTokens: 1, outputTokens: 1 }, costUsd: 0 }; };
+  const intelligenceFor = (symbol, at) => intelligenceContext({ records: [rbi], symbol, asOf: at });
+  await runTheses({ store, settings: DEFAULT_SETTINGS, symbols: ['DEMO1'], day, asOf: '2026-10-14T03:15:00.000Z', runner, intelligenceFor, dailyFor: () => ({}), state: fixture.state });
+  assert.deepEqual(seen[0].calendar.events.map(c => c.recordId), [rbi.id]);
+  assert.deepEqual(store.thesis('DEMO1', day), { ...value, createdAt: '2026-10-14T03:15:00.000Z' });
+  const decisions = [];
+  const decider = makeDecider({ store, settings: DEFAULT_SETTINGS, dailyFor: () => ({}), marketFor: at => intelligenceContext({ records: [rbi], symbol: 'MARKET', asOf: at }),
+    runner: async args => { decisions.push(args); return { value: { ...goodDecision, evidenceIds: [rbi.id] }, usage: { inputTokens: 1, outputTokens: 1 }, costUsd: 0 }; } });
+  const result = await decider({ symbol: 'DEMO1', state: fixture.state, context: buyContext([]) });
+  assert.equal(decisions.length, 1); assert.equal(result.action, 'enter'); assert.deepEqual(result.evidence, [`${rbi.id}: ${rbi.content}`]);
 });
 
 // Bar index for an IST time on 14 Oct in the 15-minute fixture (bar ending 09:30 is index 25).

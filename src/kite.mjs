@@ -14,12 +14,12 @@ function nextSixAmIst(now) {
 }
 
 export class KiteSession {
-  constructor({ apiKey, apiSecret, store, now = Date.now,
+  constructor({ apiKey, apiSecret, store, now = Date.now, universe = () => [],
     makeClient = key => new KiteConnect({ api_key: key }),
     // reconnect:false keeps the SDK off its own retry path, which calls process.exit when retries run out; LiveRunner reconnects.
     makeTicker = (key, token) => new KiteTicker({ api_key: key, access_token: token, reconnect: false }) }) {
     if (!apiKey || !apiSecret) throw new Error('Kite API key and secret are required.');
-    this.apiKey = apiKey; this.apiSecret = apiSecret; this.store = store; this.now = now; this.makeTicker = makeTicker;
+    this.apiKey = apiKey; this.apiSecret = apiSecret; this.store = store; this.now = now; this.universe = universe; this.makeTicker = makeTicker;
     this.client = makeClient(apiKey);
     this.sdkTicker = null; this.handlers = null; this.expiredSignalled = false;
     const saved = store.loadKiteSession();
@@ -50,11 +50,11 @@ export class KiteSession {
     const saved = this.store.loadKiteSession();
     if (saved) this.store.saveKiteSession({ ...saved, expiresAt: new Date(this.now()).toISOString() });
   }
-  // Universe tokens come from the stored map (the ticker subscribes to those). Anything else, such as an index, comes
-  // from one NSE instrument list per process, which keeps index tokens out of the stored map and the live stream.
+  // Universe tokens come from the stored map (the ticker subscribes to those); a universe symbol missing there needs a new login.
+  // Anything else, such as an index, comes from one NSE instrument list per process, keeping index tokens out of the map and the live stream.
   async tokenFor(symbol) {
     const stored = this.status().instruments[symbol];
-    if (stored || this.status().state === 'none') return stored;
+    if (stored || this.status().state === 'none' || this.universe().includes(symbol)) return stored;
     this.listed ??= this.client.getInstruments('NSE').then(list => new Map(list.map(item => [item.tradingsymbol, item.instrument_token])), error => { this.listed = null; throw error; });
     return (await this.listed).get(symbol);
   }

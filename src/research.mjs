@@ -33,12 +33,14 @@ const istString = ms => new Date(ms + 330 * 60_000).toISOString().replace('Z', '
 
 async function collect({ symbol, extra, now, settings, schema, runner }) {
   const { researchModel, allowedDomains } = settings.expert;
-  const nowMs = Date.parse(now), received = new Date(nowMs).toISOString();
+  const nowMs = now();
   const out = await runner({
     model: researchModel, systemPrompt: SYSTEM_PROMPT, schema, maxTurns: 3, timeoutMs: 120000,
     tools: ['WebSearch', ...allowedDomains.map(d => `WebFetch(domain:${d})`)],
     input: JSON.stringify({ symbol, ...extra, nowIst: istString(nowMs), allowedDomains, window: WINDOW }),
   });
+  // Stamped when the evidence actually arrived: a research call can run for minutes.
+  const received = new Date(now()).toISOString();
   const accepted = []; let dropped = 0;
   for (const r of out.value.records) {
     const candidate = { ...r, id: `${symbol}:${createHash('sha1').update(r.origin + r.publishedAt).digest('hex').slice(0, 12)}`, symbol,
@@ -53,10 +55,10 @@ async function collect({ symbol, extra, now, settings, schema, runner }) {
   return { records: validateIntelligence(accepted), dropped, coverageNote: out.value.coverageNote, usage: out.usage, costUsd: out.costUsd };
 }
 
-export const researchSymbol = ({ symbol, companyName, now, settings, runner = runClaudeCode }) =>
+export const researchSymbol = ({ symbol, companyName, now = Date.now, settings, runner = runClaudeCode }) =>
   collect({ symbol, extra: { companyName }, now, settings, schema: RESEARCH_SCHEMA, runner });
 
-export const researchMarket = ({ now, settings, runner = runClaudeCode }) =>
+export const researchMarket = ({ now = Date.now, settings, runner = runClaudeCode }) =>
   collect({ symbol: 'MARKET', extra: {}, now, settings, schema: MARKET_SCHEMA, runner });
 
 /** Range beyond 2 ATR, or volume beyond 3x the typical bar (20-day mean daily volume spread over the session's bars). Range needs 25+ bars of history; volume needs 20+ daily bars. */

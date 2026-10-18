@@ -10,6 +10,7 @@ import { LiveRunner, replayCapture } from '../src/live.mjs';
 import { createHash } from 'node:crypto';
 import { DEFAULT_SETTINGS } from '../src/config.mjs';
 import { DECISION_SCHEMA, THESIS_SCHEMA, makeDecider, runTheses } from '../src/expert.mjs';
+import { intelligenceContext } from '../src/intelligence.mjs';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/ticks-2026-10-14.jsonl', import.meta.url));
 const T = iso => Date.parse(iso);
@@ -33,7 +34,7 @@ function followingClock(source, clock, offsetMs = 100) {
   return { start: handlers => source.start({ ...handlers, onTick: tick => { clock.now = tick.exchangeTime + offsetMs; return handlers.onTick(tick); } }), stop: () => source.stop() };
 }
 const ABSTAIN = { action: 'abstain', reason: 'No trigger', evidence: [], counterEvidence: [], tightenStopTo: null, trigger: null, record: null };
-function setup(t, { store, session = fakeSession(), source = replayCapture(FIXTURE), clockStart = OPEN - 60_000, offsetMs, calendar = () => session14, onFatal, universe = ['DEMO1', 'DEMO2'], expert } = {}) {
+function setup(t, { store, session = fakeSession(), source = replayCapture(FIXTURE), clockStart = OPEN - 60_000, offsetMs, calendar = () => session14, onFatal, universe = ['DEMO1', 'DEMO2'], expert, log } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'live-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
   store ??= new Store(':memory:');
   const engine = new TradingEngine(store);
@@ -45,7 +46,7 @@ function setup(t, { store, session = fakeSession(), source = replayCapture(FIXTU
     book = { engine: expertEngine, decider: expert.decider ?? { limitUntil: 0 }, research: expert.research ?? (async () => ({ records: [] })), theses: expert.theses ?? (async () => {}), scoring: expert.scoring ?? (() => {}) };
   }
   const clock = { now: clockStart };
-  const runner = new LiveRunner({ engine, session, captureDir: dir, calendar, now: () => clock.now, source: followingClock(source, clock, offsetMs), intervalMs: 0, onFatal, expert: book });
+  const runner = new LiveRunner({ engine, session, captureDir: dir, calendar, now: () => clock.now, source: followingClock(source, clock, offsetMs), intervalMs: 0, onFatal, expert: book, ...(log && { log }) });
   return { engine, store, runner, clock, dir, session, expert: book };
 }
 const ledger = engine => JSON.stringify({ trades: engine.state.trades.map(({ id, ...trade }) => trade), outcomes: engine.state.decisions.map(d => d.outcome), equity: engine.state.metrics.equity });
@@ -350,7 +351,7 @@ test('restart at 11:00 skips research and theses already done and keeps theses',
 test('research runs once at 08:30 and theses at 08:45; anomaly research capped at maxResearchPerSession', async t => {
   const researched = [], thesesCalls = [];
   const research = async ({ symbol, now }) => {
-    researched.push([symbol, now]);
+    researched.push([symbol, new Date(now()).toISOString()]);
     if (symbol === 'DEMO2') throw new Error('search failed');
     return { records: symbol === 'DEMO1' ? [record] : [] };
   };
@@ -359,21 +360,72 @@ test('research runs once at 08:30 and theses at 08:45; anomaly research capped a
   const { runner, clock, engine, expert } = run;
   await runner.start(); runner.poll(); await runner.idle();
   assert.deepEqual([researched.length, thesesCalls.length], [0, 0]);
+  const rulesRecords = structuredClone(engine.state.intelligenceRecords);
   clock.now = T('2026-10-14T03:00:00Z'); runner.poll(); await runner.idle(); runner.poll(); await runner.idle();
   assert.deepEqual(researched, [['DEMO1', '2026-10-14T03:00:00.000Z'], ['DEMO2', '2026-10-14T03:00:00.000Z'], ['MARKET', '2026-10-14T03:00:00.000Z']]);
   assert.equal(thesesCalls.length, 0);
   assert.equal(expert.engine.store.researchDone(DAY), true);
   assert.deepEqual(runner.status().expert.coverageMissing, ['DEMO2']);
-  for (const book of [engine, expert.engine]) assert.deepEqual(book.state.intelligenceRecords.map(r => r.id), [record.id]);
+  // Research feeds only the expert book; the rules book stays Phase 1.
+  assert.deepEqual(expert.engine.state.intelligenceRecords.map(r => r.id), [record.id]);
+  assert.deepEqual(engine.state.intelligenceRecords, rulesRecords);
   clock.now = T('2026-10-14T03:15:00Z'); runner.poll(); await runner.idle(); runner.poll(); await runner.idle();
   assert.equal(thesesCalls.length, 1);
-  assert.deepEqual([thesesCalls[0].day, thesesCalls[0].asOf, thesesCalls[0].symbols], [DAY, '2026-10-14T02:30:00.000Z', ['DEMO1', 'DEMO2']]);
+  // The pass starts after the last warmup bar, so its asOf is the pass start time.
+  assert.deepEqual([thesesCalls[0].day, thesesCalls[0].asOf, thesesCalls[0].symbols], [DAY, '2026-10-14T03:15:00.000Z', ['DEMO1', 'DEMO2']]);
   assert.equal(thesesCalls[0].state, expert.engine.state);
   // Three wide-range DEMO1 bars: each is an anomaly, but only one research call is allowed this session.
   feedBars(source.handlers, OPEN, 4, (symbol, k) => symbol === 'DEMO1' ? [100, 120 + k] : [50, 50]); await runner.idle();
   assert.deepEqual(researched.slice(3).map(([symbol]) => symbol), ['DEMO1']);
   assert.equal(runner.status().expert.anomalyCalls, 1);
-  for (const book of [engine, expert.engine]) assert.deepEqual(book.state.intelligenceRecords.map(r => r.id), [record.id]);
+  assert.deepEqual(expert.engine.state.intelligenceRecords.map(r => r.id), [record.id]);
+  assert.deepEqual(engine.state.intelligenceRecords, rulesRecords);
+});
+
+test('I1: the 08:45 theses see research captured at 08:31 IST, and a 09:30 decision sees that thesis', async t => {
+  const expertStore = new Store(':memory:'); t.after(() => expertStore.close());
+  const captured = { ...record, id: 'DEMO1:bbbbbbbbbbbb', firstReceivedAt: '2026-10-14T03:01:00.000Z', analysisReadyAt: '2026-10-14T03:01:00.000Z' };
+  const thesis = { stance: 'candidate', thesis: 'Fictional.', mechanism: 'Fictional.', counterEvidence: [], evidenceIds: [captured.id], entryCondition: { type: 'priceAbove', level: 1 },
+    invalidation: { priceBelow: 1, note: 'Fictional.' }, expectedHoldSessions: 1, expiresAt: '2026-10-14T10:00:00.000Z', eventAssessment: { novelty: 'a', materiality: 'a', surprise: 'a', reaction: 'a' } };
+  const decision = { action: 'abstain', reason: 'Fictional.', counterEvidence: [], evidenceIds: [], tightenStopTo: null, invalidation: { priceBelow: 1, note: 'Fictional.' } };
+  const packs = [];
+  const modelRunner = async ({ input, schema }) => {
+    const { contextPack } = JSON.parse(input); packs.push(contextPack);
+    const value = schema === DECISION_SCHEMA ? decision : contextPack.symbol === 'DEMO1' ? thesis : { ...thesis, stance: 'watch', evidenceIds: [] };
+    return { value, usage: { inputTokens: 1, outputTokens: 1 }, costUsd: 0 };
+  };
+  let run;
+  const intelligenceFor = (symbol, at) => intelligenceContext({ records: run.expert.engine.state.intelligenceRecords ?? [], symbol, asOf: at });
+  const theses = args => runTheses({ ...args, store: expertStore, settings: DEFAULT_SETTINGS, runner: modelRunner, intelligenceFor, dailyFor: () => ({}) });
+  const research = async ({ symbol }) => ({ records: symbol === 'DEMO1' ? [captured] : [] });
+  run = setup(t, { clockStart: PRE_OPEN, source: manual(), expert: { store: expertStore, research, theses } });
+  await run.runner.start();
+  run.clock.now = T('2026-10-14T03:01:00Z'); run.runner.poll(); await run.runner.idle();
+  run.clock.now = T('2026-10-14T03:15:00Z'); run.runner.poll(); await run.runner.idle();
+  assert.deepEqual(packs[0].evidence.claims.map(claim => claim.recordId), [captured.id]);
+  const stored = expertStore.thesis('DEMO1', DAY);
+  assert.equal(stored.invalid, undefined); assert.deepEqual(stored.evidenceIds, [captured.id]); assert.equal(stored.createdAt, '2026-10-14T03:15:00.000Z');
+  // The bar ending 09:30 IST: the decider sees the 08:45 thesis.
+  const decider = makeDecider({ store: expertStore, settings: DEFAULT_SETTINGS, runner: modelRunner, dailyFor: () => ({}) });
+  const state = run.expert.engine.state, bar = { open: 100, high: 101, low: 99, close: 100, volume: 10 };
+  const decisionState = { ...state, dataset: [...state.dataset, { timestamp: '2026-10-14T04:00:00.000Z', bars: { DEMO1: bar, DEMO2: bar } }], cursor: state.dataset.length };
+  const result = await decider({ symbol: 'DEMO1', state: decisionState, context: { rulesChoice: 'none', candidates: [], intelligence: intelligenceFor('DEMO1', '2026-10-14T04:00:00.000Z') } });
+  assert.equal(result.trigger, 'entry'); assert.deepEqual(packs.at(-1).portfolio.thesis.evidenceIds, [captured.id]);
+});
+
+test('M3: a research merge that throws is logged and never fails the next rules bar', async t => {
+  for (const error of [new Error('merge broke'), Object.assign(new Error('disk gone'), { code: 'PERSISTENCE_ERROR' })]) {
+    const logs = [], source = manual();
+    const run = setup(t, { clockStart: PRE_OPEN, source, log: message => logs.push(message), expert: { research: async () => ({ records: [record] }) } });
+    await run.runner.start();
+    run.expert.engine.setIntelligence = () => { throw error; };
+    run.clock.now = T('2026-10-14T03:00:00Z'); run.runner.poll(); await run.runner.idle();
+    feedBars(source.handlers, OPEN, 4); await run.runner.idle();
+    assert.equal(run.runner.status().state, 'live'); assert.equal(run.runner.status().counters.rejectedRows, 0);
+    assert.equal(run.engine.state.cursor, run.engine.state.dataset.length - 1); assert.equal(run.engine.state.decisions.length, 6);
+    if (error.code) assert.match(run.runner.status().expert.halted, /disk gone/);
+    else assert.ok(logs.some(message => /Research not applied to the expert book: merge broke/.test(message)), logs.join('\n'));
+  }
 });
 
 test('daily index warmup fetches NIFTY 50 and sector indices once per day', async t => {

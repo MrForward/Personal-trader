@@ -18,7 +18,7 @@ const sum = values => values.reduce((total, value) => total + value, 0);
  * Everything the model sees for one symbol at `asOf`. Pure: every series is cut at `asOf` here, whatever the caller passed in.
  * A daily bar is stamped at its session close (15:30 IST), so the day still forming at `asOf` is never visible.
  */
-export function buildContextPack({ symbol, asOf, state, daily = {}, intelligence = null, memory = [], thesis = null, callsRemaining = null }) {
+export function buildContextPack({ symbol, asOf, state, daily = {}, intelligence = null, market = null, memory = [], thesis = null, callsRemaining = null }) {
   const at = new Date(asOf).getTime();
   if (!Number.isFinite(at)) throw new RangeError('asOf must be a valid time.');
   asOf = new Date(at).toISOString();
@@ -38,6 +38,8 @@ export function buildContextPack({ symbol, asOf, state, daily = {}, intelligence
   const sectorIndex = SECTOR_INDEX[symbol] ?? null;
 
   const claims = (intelligence?.claims ?? []).filter(claim => known(claim.analysisReadyAt));
+  const marketClaims = (market?.claims ?? []).filter(claim => known(claim.analysisReadyAt));
+  const isEvent = claim => claim.sourceKinds?.includes('calendar');
   const holidayLimit = new Date(at + 5.5 * 3_600_000 + 14 * 86_400_000).toISOString().slice(0, 10);
 
   const pack = {
@@ -50,8 +52,8 @@ export function buildContextPack({ symbol, asOf, state, daily = {}, intelligence
       nifty50: closes('NIFTY 50'),
       sector: { index: sectorIndex, closes: sectorIndex ? closes(sectorIndex) : null },
     },
-    evidence: { claims: claims.filter(claim => !claim.sourceKinds?.includes('calendar')), coverage: intelligence?.coverage ?? null, limitations: intelligence?.limitations ?? [] },
-    calendar: { events: claims.filter(claim => claim.sourceKinds?.includes('calendar')), holidays: HOLIDAYS_2026.filter(day => day > today && day <= holidayLimit) },
+    evidence: { claims: claims.filter(claim => !isEvent(claim)), market: [], coverage: intelligence?.coverage ?? null, limitations: intelligence?.limitations ?? [] },
+    calendar: { events: [], holidays: HOLIDAYS_2026.filter(day => day > today && day <= holidayLimit) },
     portfolio: {
       cash: state.cash ?? null, equity: state.metrics?.equity ?? null, exposurePct: state.metrics?.exposurePct ?? null,
       position: structuredClone(state.positions?.find(position => position.symbol === symbol) ?? null),
@@ -60,7 +62,14 @@ export function buildContextPack({ symbol, asOf, state, daily = {}, intelligence
     memory: memory.filter(entry => known(entry.reviewedAt)).sort((a, b) => Date.parse(b.reviewedAt) - Date.parse(a.reviewedAt)).slice(0, 5),
     limits: { ...state.settings.risk, sizingIsDeterministic: true, callsRemaining },
   };
-  const size = JSON.stringify(pack).length;
+  // Market-wide claims (symbol MARKET) sit beside the stock's own; calendar ones of either kind are events.
+  const placeMarket = list => { pack.evidence.market = list.filter(claim => !isEvent(claim)); pack.calendar.events = [...claims, ...list].filter(isEvent); };
+  placeMarket(marketClaims);
+  let size = JSON.stringify(pack).length;
+  if (size > MAX_PACK_CHARS && marketClaims.length > 20) {
+    placeMarket(marketClaims.toSorted((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)).slice(0, 20));
+    size = JSON.stringify(pack).length;
+  }
   if (size > MAX_PACK_CHARS) throw new Error(`Context pack is ${size} characters; the limit is ${MAX_PACK_CHARS}.`);
   return pack;
 }
@@ -151,7 +160,8 @@ function loadPrompt(dir, name, schema) {
 function packFor(args) {
   try { return buildContextPack(args); } catch (error) { throw /limit is/.test(error.message) ? new Error('Context pack too large') : error; }
 }
-const evidenceMap = pack => new Map([...pack.evidence.claims, ...pack.calendar.events].flatMap(c => [c.recordId, ...(c.recordIds ?? [])].map(id => [id, c.content])));
+// Recorded packs from before the market block have no evidence.market.
+const evidenceMap = pack => new Map([...pack.evidence.claims, ...(pack.evidence.market ?? []), ...pack.calendar.events].flatMap(c => [c.recordId, ...(c.recordIds ?? [])].map(id => [id, c.content])));
 
 // Reserves a call, runs, validates; the caller records the outcome.
 async function callModel({ store, settings, runner, model, prompt, schema, request, validate }) {
@@ -184,7 +194,7 @@ async function recorded({ store, row, replay, live }) {
 }
 
 /** The engine's decider for the expert book. Never mutates `state` or `context`; a rejection becomes a suppressed HOLD in the engine. */
-export function makeDecider({ store, engineName = 'expert', settings, runner = runClaudeCode, promptDir = PROMPT_DIR, dailyFor = day => store.dailyFor(day), now = Date.now, replay = false }) {
+export function makeDecider({ store, engineName = 'expert', settings, runner = runClaudeCode, promptDir = PROMPT_DIR, dailyFor = day => store.dailyFor(day), marketFor = () => null, now = Date.now, replay = false }) {
   const prompt = loadPrompt(promptDir, 'decision', DECISION_SCHEMA);
   const decider = async ({ symbol, state, context }) => {
     const row = state.dataset[state.cursor], asOf = new Date(row.timestamp).toISOString(), day = istDay.format(Date.parse(asOf));
@@ -203,7 +213,7 @@ export function makeDecider({ store, engineName = 'expert', settings, runner = r
     const key = [engineName, symbol, trigger, asOf, prompt.hash].join('|');
     const out = await recorded({ store, replay, row: { key, engine: engineName, symbol, trigger, asOf, promptHash: prompt.hash }, live: async () => {
       if (now() < decider.limitUntil) throw new Error(`subscription limit until ${new Date(decider.limitUntil).toISOString()}`);
-      const pack = packFor({ symbol, asOf, state, daily: dailyFor(day), intelligence: context.intelligence, memory: store.memoryFor(symbol, asOf), thesis,
+      const pack = packFor({ symbol, asOf, state, daily: dailyFor(day), intelligence: context.intelligence, market: marketFor(asOf), memory: store.memoryFor(symbol, asOf), thesis,
         callsRemaining: settings.model.dailyCallLimit - store.callCount() });
       try {
         return await callModel({ store, settings, runner, prompt, schema: DECISION_SCHEMA, model: settings.expert.decisionModel, request: { trigger, contextPack: pack },
@@ -235,7 +245,7 @@ export async function runTheses({ store, settings, symbols, day, asOf, runner = 
     try {
       ({ value: payload } = await recorded({ store, replay, row, live: async () => {
         if (limited) throw codeError('subscription limit', 'MODEL_LIMIT');
-        const pack = packFor({ symbol, asOf, state, daily: dailyFor(day), intelligence: intelligenceFor(symbol, asOf), memory: store.memoryFor(symbol, asOf),
+        const pack = packFor({ symbol, asOf, state, daily: dailyFor(day), intelligence: intelligenceFor(symbol, asOf), market: intelligenceFor('MARKET', asOf), memory: store.memoryFor(symbol, asOf),
           callsRemaining: settings.model.dailyCallLimit - store.callCount() });
         const ids = [...evidenceMap(pack).keys()];
         try {

@@ -125,7 +125,7 @@ The expert paper book calls the Claude Code CLI in print mode (`claude -p`) unde
 
 1. **On your Mac**, run `claude --version` and note the number, then run `claude setup-token` and sign in with your own Claude account. It prints a one-year OAuth token. Do not paste it into chat, Git or screenshots.
 2. **On the VPS**, add one line to `/etc/trading-lab.env` with `sudoedit`: `CLAUDE_CODE_OAUTH_TOKEN=<the token>`. Keep the file at mode 0600, root-owned.
-3. **No `ANTHROPIC_API_KEY` may exist** in `/etc/trading-lab.env`, the service user's environment or any profile file. In print mode a key silently takes precedence over the subscription token and would bill the API. Check with `sudo grep -r ANTHROPIC_API_KEY /etc/trading-lab.env /etc/environment` (no output is correct).
+3. **No `ANTHROPIC_API_KEY` may exist** in `/etc/trading-lab.env`, the service user's environment or any profile file. In print mode a key silently takes precedence over the subscription token and would bill the API. Check with `sudo grep -l ANTHROPIC_API_KEY /etc/trading-lab.env /etc/environment` (it names matching files without printing a key; no output is correct) and with `systemctl show trading-lab -p Environment | grep -c ANTHROPIC_API_KEY`, which checks the unit's `Environment=` lines (`0` is correct).
 4. **Install the CLI, pinned** to the version you tested on the Mac: `sudo npm i -g @anthropic-ai/claude-code@<version from claude --version on your Mac>`. Do not use `@latest`; upgrade only after testing the new version on the Mac.
 5. **Verify as the service user** without putting the token on a command line or in shell history. In a root shell, the token is loaded from the env file:
 

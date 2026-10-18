@@ -6,11 +6,11 @@ import { redact, registerSecret } from '../src/secrets.mjs';
 import { ACCESS_TOKEN, fakeClient, fakeTicker } from './kite-fakes.mjs';
 
 const T = iso => Date.parse(iso);
-function setup(t, { now = T('2026-10-27T04:00:00Z'), client = fakeClient(), ticker = fakeTicker() } = {}) {
+function setup(t, { now = T('2026-10-27T04:00:00Z'), client = fakeClient(), ticker = fakeTicker(), universe } = {}) {
   const store = new Store(':memory:'); t.after(() => store.close());
   const clock = { now };
   const madeTickers = [];
-  const session = new KiteSession({ apiKey: 'key', apiSecret: 'shh-secret-value', store, now: () => clock.now,
+  const session = new KiteSession({ apiKey: 'key', apiSecret: 'shh-secret-value', store, now: () => clock.now, ...(universe && { universe }),
     makeClient: () => client, makeTicker: (apiKey, token) => { madeTickers.push(token); ticker.access_token = token; return ticker; } });
   return { store, session, clock, client, ticker, madeTickers };
 }
@@ -140,4 +140,15 @@ test('index bars resolve through one cached instrument lookup and are never stor
   session.ticker().start({ onTick() {}, onClose() {} }); ticker.emit('connect');
   assert.deepEqual(ticker.subscribed, [1, 2]);
   await assert.rejects(() => session.historicalBars({ ...args, symbol: 'NOPE' }), /No instrument token for NOPE/);
+});
+
+test('a universe symbol missing from the stored map still asks for a new login; only non-universe names use the instrument list', async t => {
+  const client = fakeClient({ symbols: ['A', 'B', 'C', 'NIFTY 50'], candles: token => [{ date: new Date('2026-10-13T00:00:00+05:30'), open: 1, high: 1, low: 1, close: token, volume: 0 }] });
+  const universe = ['A', 'B'];
+  const { session } = setup(t, { client, universe: () => universe });
+  await session.complete('reqtoken123', ['A', 'B']);
+  universe.push('C'); // added to the universe after this login
+  const args = { barMinutes: 'day', count: 5, endMs: T('2026-10-14T05:00:00Z') };
+  await assert.rejects(() => session.historicalBars({ ...args, symbol: 'C' }), /No instrument token for C; log in again/);
+  assert.equal((await session.historicalBars({ ...args, symbol: 'NIFTY 50' }))[0].close, 4);
 });

@@ -180,23 +180,22 @@ export class LiveRunner {
     if (!engine) return;
     try {
       const stored = engine.store.thesesFor(day);
-      if (!symbols.every(symbol => stored[symbol])) await this.expert.theses({ symbols, day, asOf: engine.state.dataset.at(-1).timestamp, state: engine.state });
+      // Pass start, not the prior session's last bar, so the morning's research is visible and citable; later bars see it via createdAt.
+      const asOf = new Date(Math.max(Date.parse(engine.state.dataset.at(-1).timestamp), this.now())).toISOString();
+      if (!symbols.every(symbol => stored[symbol])) await this.expert.theses({ symbols, day, asOf, state: engine.state });
       this.thesesDone = true;
     } catch (error) { if (!this.expertFault(error)) this.log(`Theses failed: ${error.message}`); }
   }
-  // One call per target; a failure marks that target's coverage missing and never throws. Results reach both engines through the serial queue.
+  // One call per target; a failure marks that target's coverage missing and never throws. Results reach only the expert book (the rules book stays Phase 1), through the serial queue.
   async research(targets) {
     const records = [];
     for (const symbol of targets) {
-      try { records.push(...(await this.expert.research({ symbol, now: new Date(this.now()).toISOString() })).records); this.coverageMissing.delete(symbol); }
+      try { records.push(...(await this.expert.research({ symbol, now: this.now })).records); this.coverageMissing.delete(symbol); }
       catch (error) { this.coverageMissing.add(symbol); this.log(`Research for ${symbol} failed; coverage missing: ${error.message}`); }
     }
     if (!records.length) return;
-    this.pending = this.pending.then(() => this.run(() => {
-      try { this.mergeIntelligence(this.engine, records); } catch (error) { if (fatal(error)) return this.die(error); this.log(`Research not applied to the rules book: ${error.message}`); }
-      const expert = this.expertEngine();
-      try { if (expert) this.mergeIntelligence(expert, records); } catch (error) { if (!this.expertFault(error)) this.log(`Research not applied to the expert book: ${error.message}`); }
-    }));
+    this.pending = this.pending.then(() => this.run(() => { const expert = this.expertEngine(); if (expert) this.mergeIntelligence(expert, records); }))
+      .catch(error => { if (!this.expertFault(error)) this.log(`Research not applied to the expert book: ${error.message}`); });
     return this.pending;
   }
   // Drops records whose id the engine already has, and any that would make its record set invalid (which would veto every entry).

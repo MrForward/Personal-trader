@@ -4,10 +4,10 @@ import { DEFAULT_SETTINGS } from '../src/config.mjs';
 import { intelligenceContext } from '../src/intelligence.mjs';
 import { RESEARCH_SCHEMA, researchSymbol, researchMarket, isAnomaly } from '../src/research.mjs';
 
-const NOW = '2026-10-19T03:00:00Z';
+const NOW = '2026-10-19T03:00:00Z', clock = () => Date.parse(NOW);
 const fakeRunner = (output, seen = []) => async (args) => { seen.push(args); return { value: output, usage: { inputTokens: 1, outputTokens: 1 }, costUsd: 0.01 }; };
 const rec = (sourceUrl, extra = {}) => ({ origin: 'Infosys results', publishedAt: '2026-10-18T10:00:00+05:30', sourceKind: 'primary', verificationStatus: 'primary-confirmed', content: 'Results announced.', sourceUrl, ...extra });
-const run = (records, extra = {}) => researchSymbol({ symbol: 'INFY', companyName: 'Infosys', now: NOW, settings: DEFAULT_SETTINGS, runner: fakeRunner({ records, coverageNote: 'ok' }), ...extra });
+const run = (records, extra = {}) => researchSymbol({ symbol: 'INFY', companyName: 'Infosys', now: clock, settings: DEFAULT_SETTINGS, runner: fakeRunner({ records, coverageNote: 'ok' }), ...extra });
 
 test('records get capture timestamps, ids and pass validateIntelligence', async () => {
   const r = await run([rec('https://www.nseindia.com/x')]);
@@ -17,6 +17,13 @@ test('records get capture timestamps, ids and pass validateIntelligence', async 
   assert.equal(r.records[0].symbol, 'INFY');
   assert.match(r.records[0].id, /^INFY:[0-9a-f]{12}$/);
   assert.deepEqual([r.dropped, r.coverageNote, r.costUsd], [0, 'ok', 0.01]);
+});
+
+test('capture stamps are taken after the runner returns, not when the call starts', async () => {
+  let ms = Date.parse(NOW);
+  const runner = async args => { ms += 90_000; return fakeRunner({ records: [rec('https://www.nseindia.com/x')], coverageNote: 'ok' })(args); };
+  const r = await researchSymbol({ symbol: 'INFY', companyName: 'Infosys', now: () => ms, settings: DEFAULT_SETTINGS, runner });
+  assert.deepEqual([r.records[0].firstReceivedAt, r.records[0].analysisReadyAt], ['2026-10-19T03:01:30.000Z', '2026-10-19T03:01:30.000Z']);
 });
 
 test('off-list URLs are dropped and counted', async () => {
@@ -58,7 +65,7 @@ test('runner receives WebFetch domain rules and no portfolio fields', async () =
 
 test('researchMarket tags MARKET, sends no company name, applies the allow-list', async () => {
   const seen = [];
-  const r = await researchMarket({ now: NOW, settings: DEFAULT_SETTINGS, runner: fakeRunner({ records: [rec('https://www.rbi.org.in/p', { origin: 'RBI policy', sourceKind: 'calendar', eventAt: '2026-10-25T10:00:00+05:30' }), rec('https://example.com/q', { origin: 'x' })], coverageNote: 'ok' }, seen) });
+  const r = await researchMarket({ now: clock, settings: DEFAULT_SETTINGS, runner: fakeRunner({ records: [rec('https://www.rbi.org.in/p', { origin: 'RBI policy', sourceKind: 'calendar', eventAt: '2026-10-25T10:00:00+05:30' }), rec('https://example.com/q', { origin: 'x' })], coverageNote: 'ok' }, seen) });
   assert.deepEqual([r.records.length, r.dropped, r.records[0].symbol], [1, 1, 'MARKET']);
   assert.match(r.records[0].id, /^MARKET:/);
   assert.equal(JSON.parse(seen[0].input).companyName, undefined);
@@ -80,7 +87,7 @@ test('isAnomaly on range and volume', () => {
 
 test('MARKET call allows primary sourceKind and uses the same tools and maxTurns as a symbol call', async () => {
   const a = [], b = [];
-  await researchMarket({ now: NOW, settings: DEFAULT_SETTINGS, runner: fakeRunner({ records: [], coverageNote: 'n' }, a) });
+  await researchMarket({ now: clock, settings: DEFAULT_SETTINGS, runner: fakeRunner({ records: [], coverageNote: 'n' }, a) });
   await run([], { runner: fakeRunner({ records: [], coverageNote: 'n' }, b) });
   assert.deepEqual(a[0].schema.properties.records.items.properties.sourceKind.enum, ['primary', 'calendar', 'news']);
   assert.deepEqual([a[0].tools, a[0].maxTurns], [b[0].tools, 3]);

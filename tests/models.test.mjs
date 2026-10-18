@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { existsSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { providerStatus, reviewMarket, runClaudeCode, schemaErrors, validateModelConfig } from '../src/models.mjs';
 
 const FAKE_OPENAI_KEY = 'test-openai-key-not-a-real-credential';
@@ -233,13 +235,22 @@ test('claude-code: argv carries flags and child env excludes API keys', async ()
   const v = await ccArgv({ model: 'claude-sonnet-5-5', systemPrompt: 'sys', input: 'in', tools: ['WebSearch', 'WebFetch(domain:nseindia.com)'], maxTurns: 3,
     env: { FAKE_CLAUDE_MODE: 'argv', PATH: process.env.PATH, ANTHROPIC_API_KEY: 'leak', CLAUDE_CODE_OAUTH_TOKEN: 'tok', HOME: '/tmp' } });
   const a = v.argv.join(' ');
-  for (const flag of ['-p', '--output-format json', '--json-schema', '--model claude-sonnet-5-5', '--max-turns 3', '--max-budget-usd 0.5', '--allowedTools WebSearch WebFetch(domain:nseindia.com)', '--system-prompt sys']) assert.ok(a.includes(flag), flag);
-  assert.ok(!v.argv.includes('--tools'));
+  for (const flag of ['-p', '--output-format json', '--json-schema', '--model claude-sonnet-5-5', '--max-turns 3', '--max-budget-usd 0.5', '--allowedTools WebSearch WebFetch(domain:nseindia.com)', '--system-prompt sys', '--no-session-persistence']) assert.ok(a.includes(flag), flag);
+  // Only the named built-ins exist in the child; the domain rules then narrow WebFetch.
+  assert.equal(v.argv[v.argv.indexOf('--tools') + 1], 'WebSearch,WebFetch');
   assert.ok(!v.env.includes('ANTHROPIC_API_KEY')); assert.ok(v.env.includes('CLAUDE_CODE_OAUTH_TOKEN')); assert.equal(v.stdin, 'in');
 });
 test('claude-code: no tools passes --tools ""', async () => {
   const { argv } = await ccArgv();
-  assert.equal(argv[argv.indexOf('--tools') + 1], ''); assert.ok(!argv.includes('--allowedTools'));
+  assert.equal(argv[argv.indexOf('--tools') + 1], ''); assert.ok(!argv.includes('--allowedTools')); assert.ok(argv.includes('--no-session-persistence'));
+});
+test('claude-code: each call runs in a fresh empty temp dir that is removed afterwards', async () => {
+  const first = await ccArgv(), second = await ccArgv();
+  for (const run of [first, second]) {
+    assert.ok(run.cwd.startsWith(realpathSync(tmpdir())), run.cwd); assert.notEqual(run.cwd, realpathSync(process.cwd()));
+    assert.deepEqual(run.files, []); assert.equal(existsSync(run.cwd), false);
+  }
+  assert.notEqual(first.cwd, second.cwd);
 });
 test('claude-code: limit message becomes MODEL_LIMIT with resetAt', async () => {
   await assert.rejects(ccRun('limit'), (e) => e.code === 'MODEL_LIMIT' && typeof e.resetAt === 'string' && new Date(e.resetAt) > new Date());

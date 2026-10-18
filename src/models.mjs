@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { redact, registerSecret } from './secrets.mjs';
 
 if (process.env.CLAUDE_CODE_OAUTH_TOKEN) registerSecret(process.env.CLAUDE_CODE_OAUTH_TOKEN);
@@ -290,12 +293,15 @@ function parseResetAt(text, now = Date.now()) {
 // code.claude.com headless docs; written against CLI 2.1.52; live verification pending.
 export async function runClaudeCode({ model, systemPrompt, input, schema, tools = [], maxTurns = 1, maxBudgetUsd = 0.5, timeoutMs = 60000, binary = 'claude', env = process.env, spawnImpl = spawn }) {
   const args = ['-p', '--output-format', 'json', '--model', model, '--system-prompt', systemPrompt, '--json-schema', JSON.stringify(schema),
-    '--max-turns', String(maxTurns), '--max-budget-usd', String(maxBudgetUsd),
-    ...(tools.length ? ['--allowedTools', ...tools] : ['--tools', ''])];
+    '--max-turns', String(maxTurns), '--max-budget-usd', String(maxBudgetUsd), '--no-session-persistence',
+    // --tools limits the child to the named built-ins (no Read, Glob, Grep or Bash); --allowedTools then applies the domain rules.
+    '--tools', [...new Set(tools.map((tool) => tool.replace(/\(.*$/, '')))].join(','), ...(tools.length ? ['--allowedTools', ...tools] : [])];
   // FAKE_CLAUDE_* lets tests steer tests/fixtures/fake-claude.mjs; real runs never set them.
   const picked = Object.fromEntries(Object.entries(env).filter(([k]) => ['PATH', 'HOME', 'LANG', 'CLAUDE_CODE_OAUTH_TOKEN'].includes(k) || k.startsWith('FAKE_CLAUDE_')));
+  // A fresh empty working directory per call, so the child can see no project or home files.
+  const cwd = mkdtempSync(join(tmpdir(), 'claude-run-'));
   const { stdout, stderr, code } = await new Promise((resolve, reject) => {
-    const child = spawnImpl(binary, args, { env: picked, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawnImpl(binary, args, { env: picked, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '', err = '', done = false;
     const finish = (fn, v) => { if (!done) { done = true; clearTimeout(timer); fn(v); } };
     const timer = setTimeout(() => { child.kill('SIGKILL'); finish(reject, modelError('MODEL_TIMEOUT', 'claude -p timed out.')); }, timeoutMs);
@@ -305,7 +311,7 @@ export async function runClaudeCode({ model, systemPrompt, input, schema, tools 
     child.on('close', (c) => finish(resolve, { stdout: out, stderr: err, code: c }));
     child.stdin.on('error', () => {});
     child.stdin.end(input);
-  });
+  }).finally(() => rmSync(cwd, { recursive: true, force: true }));
   if (/hit your (session|weekly) limit/i.test(stdout)) throw modelError('MODEL_LIMIT', 'Claude Code usage limit reached.', { resetAt: parseResetAt(stdout) });
   if (code !== 0) throw modelError('MODEL_EXIT', `claude -p exited with code ${code}: ${(stderr || stdout).trim().slice(0, 500)}`);
   let result;

@@ -131,6 +131,7 @@ function renderExpert() {
   const parts = [`Today: ${calls.length} model calls, ${suppressed.length} suppressed, cost $${cost.toFixed(2)} (usage estimate; marginal cost is ₹0 under the subscription).`];
   if (runner) parts.push(`Research ${runner.researchDone ? 'done' : 'not yet run'} today, theses ${runner.thesesDone ? 'written' : 'not yet written'}, ${runner.coverageMissing.length ? `no coverage for ${runner.coverageMissing.join(', ')}` : 'coverage complete'}${runner.halted ? `. Halted: ${runner.halted}` : ''}.`);
   else parts.push('No live runner: research and theses run only during a live session.');
+  if (e.error) parts.push(`Expert book could not be read: ${e.error}`);
   text('expert-summary', parts.join(' '));
   $('expert-limit').hidden = !runner?.limitUntil;
   if (runner?.limitUntil) text('expert-limit', `Claude usage limit reached; no model calls until ${date(runner.limitUntil, true)} IST.`);

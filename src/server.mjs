@@ -74,34 +74,37 @@ export function createApplication({
       return reviewer(input);
     },
   });
-  // Phase 1b expert book: its own store and engine; it trades only when expert.enabled is true at startup.
-  const expertStore = new Store(expertDbPath);
-  let expertEngine;
-  const expertIntelligence = ({ symbol, asOf }) => intelligenceContext({ records: expertEngine?.state.intelligenceRecords ?? [], symbol, asOf });
-  // Read through to the expert engine so settings changes reach the decider without a restart.
-  const expertSettings = { get model() { return expertEngine.state.settings.model; }, get expert() { return expertEngine.state.settings.expert; } };
-  const decider = makeDecider({ store: expertStore, settings: expertSettings, runner: modelRunner });
-  expertEngine = new TradingEngine(expertStore, { decider, intelligenceProvider: expertIntelligence });
+  // Phase 1b expert book: its own store and engine, built only when expert.enabled is true at startup, so a disabled book cannot touch the rules path.
+  const expertOn = engine.state.settings.expert.enabled === true;
+  let expertStore = null, expertEngine = null, expertBook = null;
   // Both books share every setting (spec §2); the expert engine keeps its own version counter.
   const withoutVersion = ({ version: _version, ...rest }) => rest;
-  const canonical = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort()) : item);
-  if (canonical(withoutVersion(expertEngine.state.settings)) !== canonical(withoutVersion(engine.state.settings))) {
-    try { expertEngine.settings(withoutVersion(engine.state.settings)); }
-    catch (error) { process.stderr.write(`Warning: expert settings not synced with the rules book: ${publicError(error)}\n`); }
+  if (expertOn) {
+    expertStore = new Store(expertDbPath);
+    const expertIntelligence = ({ symbol, asOf }) => intelligenceContext({ records: expertEngine?.state.intelligenceRecords ?? [], symbol, asOf });
+    // Read through to the expert engine so settings changes reach the decider without a restart.
+    const expertSettings = { get model() { return expertEngine.state.settings.model; }, get expert() { return expertEngine.state.settings.expert; } };
+    const decider = makeDecider({ store: expertStore, settings: expertSettings, runner: modelRunner, marketFor: asOf => expertIntelligence({ symbol: 'MARKET', asOf }) });
+    expertEngine = new TradingEngine(expertStore, { decider, intelligenceProvider: expertIntelligence });
+    const canonical = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort()) : item);
+    if (canonical(withoutVersion(expertEngine.state.settings)) !== canonical(withoutVersion(engine.state.settings))) {
+      try { expertEngine.settings(withoutVersion(engine.state.settings)); }
+      catch (error) { process.stderr.write(`Warning: expert settings not synced with the rules book: ${publicError(error)}\n`); }
+    }
+    const research = async ({ symbol, now }) => {
+      const settings = expertEngine.state.settings;
+      const id = expertStore.reserveCall({ provider: 'claude-code', model: settings.expert.researchModel, dailyCallLimit: settings.model.dailyCallLimit });
+      let out;
+      try { out = symbol === 'MARKET' ? await researchMarket({ now, settings, runner: modelRunner }) : await researchSymbol({ symbol, companyName: symbol, now, settings, runner: modelRunner }); }
+      catch (error) { expertStore.finishCall(id, 'failed'); throw error; }
+      expertStore.finishCall(id, 'completed', out.usage);
+      return out;
+    };
+    const theses = ({ symbols, day, asOf, state }) => runTheses({ store: expertStore, settings: expertEngine.state.settings, symbols, day, asOf, state, runner: modelRunner,
+      intelligenceFor: (symbol, at) => expertIntelligence({ symbol, asOf: at }) });
+    const scoring = makeScoring({ expertEngine, rulesEngine: engine, runner: modelRunner });
+    expertBook = { engine: expertEngine, decider, research, theses, scoring };
   }
-  const expertOn = engine.state.settings.expert.enabled === true;
-  const research = async ({ symbol, now }) => {
-    const settings = expertEngine.state.settings;
-    const id = expertStore.reserveCall({ provider: 'claude-code', model: settings.expert.researchModel, dailyCallLimit: settings.model.dailyCallLimit });
-    let out;
-    try { out = symbol === 'MARKET' ? await researchMarket({ now, settings, runner: modelRunner }) : await researchSymbol({ symbol, companyName: symbol, now, settings, runner: modelRunner }); }
-    catch (error) { expertStore.finishCall(id, 'failed'); throw error; }
-    expertStore.finishCall(id, 'completed', out.usage);
-    return out;
-  };
-  const theses = ({ symbols, day, asOf, state }) => runTheses({ store: expertStore, settings: expertEngine.state.settings, symbols, day, asOf, state, runner: modelRunner,
-    intelligenceFor: (symbol, at) => expertIntelligence({ symbol, asOf: at }) });
-  const scoring = makeScoring({ expertEngine, rulesEngine: engine, runner: modelRunner });
   // One writer: requests and replay ticks cannot race settings, state or the cursor.
   let queue = Promise.resolve();
   const serial = operation => {
@@ -110,12 +113,12 @@ export function createApplication({
     return result;
   };
   let app;
-  const kiteSession = kite?.apiKey ? new KiteSession({ apiKey: kite.apiKey, apiSecret: kite.apiSecret, store,
+  const kiteSession = kite?.apiKey ? new KiteSession({ apiKey: kite.apiKey, apiSecret: kite.apiSecret, store, universe: () => engine.state.settings.universe,
     ...(makeClient ? { makeClient } : {}), ...(makeTicker ? { makeTicker } : {}) }) : null;
   const runner = kiteSession ? new LiveRunner({ engine, session: kiteSession, run: serial,
     captureDir: captureDir ?? (dbPath === ':memory:' ? resolve(projectRoot, 'data/ticks') : resolve(dirname(dbPath), 'ticks')),
     onFatal: error => { process.stderr.write(`Live runner stopped: ${redact(error.message)}\n`); process.exitCode = 1; void app?.close(); },
-    expert: expertOn ? { engine: expertEngine, decider, research, theses, scoring } : null, ...liveOptions }) : null;
+    expert: expertBook, ...liveOptions }) : null;
   const kiteStatus = () => kiteSession ? { configured: true, session: kiteSession.status(), runner: runner.status() } : { configured: false };
   const snapshot = () => {
     const value = engine.snapshot();
@@ -126,11 +129,20 @@ export function createApplication({
       contexts: value.market.map(asset => intelligenceProvider({ symbol: asset.symbol, asOf: value.run.timestamp })),
     };
     const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-    value.expert = { enabled: expertOn, book: expertEngine.snapshot(), theses: expertStore.thesesFor(today), runner: runner?.status().expert ?? null };
+    value.expert = { enabled: false, book: null, theses: {}, runner: null };
+    // An expert read that fails is reported beside the rules state, never instead of it.
+    if (expertOn) {
+      try { value.expert = { enabled: true, book: expertEngine.snapshot(), theses: expertStore.thesesFor(today), runner: runner?.status().expert ?? null }; }
+      catch (error) { value.expert = { enabled: true, book: null, theses: {}, runner: null, error: publicError(error) }; }
+    }
     return value;
   };
   const reports = () => {
-    const expertByDay = new Map(expertStore.dailyReports().map(report => [report.day, report]));
+    let expertByDay = new Map();
+    if (expertOn) {
+      try { expertByDay = new Map(expertStore.dailyReports().map(report => [report.day, report])); }
+      catch (error) { process.stderr.write(`Expert reports unavailable: ${publicError(error)}\n`); }
+    }
     return store.dailyReports().map(rules => ({ day: rules.day, rules, expert: expertByDay.get(rules.day) ?? null }));
   };
   let closing = false;
@@ -194,7 +206,7 @@ export function createApplication({
           engine.settings(body);
           // Every setting is mirrored to the expert book; its own guards (open positions, trades) can refuse, which is a warning.
           const mirror = withoutVersion(body);
-          if (Object.keys(mirror).length) {
+          if (expertEngine && Object.keys(mirror).length) {
             try { expertEngine.settings(mirror); }
             catch (error) { process.stderr.write(`Expert settings not mirrored: ${publicError(error)}\n`); return { ...snapshot(), expertWarning: publicError(error) }; }
           }
@@ -248,7 +260,7 @@ export function createApplication({
       if (interval) clearInterval(interval);
       if (server.listening) await new Promise(resolveClose => server.close(resolveClose));
       await queue;
-      store.close(); expertStore.close();
+      store.close(); expertStore?.close();
     },
   };
   return app;

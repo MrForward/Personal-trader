@@ -14,7 +14,7 @@ if (mode === 'ok') {
 } else if (mode === 'hang') {
   await new Promise((resolve) => setTimeout(resolve, 10000));
 } else if (mode === 'argv') {
-  console.log(JSON.stringify({ type: 'result', structured_output: { argv: process.argv.slice(2), env: Object.keys(process.env), stdin } }));
+  console.log(JSON.stringify({ type: 'result', structured_output: { argv: process.argv.slice(2), env: Object.keys(process.env), stdin, cwd: process.cwd(), files: (await import('node:fs')).readdirSync('.') } }));
 } else {
   console.error('unknown FAKE_CLAUDE_MODE');
   process.exit(2);

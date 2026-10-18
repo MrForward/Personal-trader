@@ -1,10 +1,10 @@
 [
   {
-    "key": "expert|DEMO1|thesis|2026-10-14T02:30:00.000Z|7719a14a56cef542",
+    "key": "expert|DEMO1|thesis|2026-10-14T03:15:00.000Z|7719a14a56cef542",
     "engine": "expert",
     "symbol": "DEMO1",
     "trigger": "thesis",
-    "asOf": "2026-10-14T02:30:00.000Z",
+    "asOf": "2026-10-14T03:15:00.000Z",
     "promptHash": "7719a14a56cef542",
     "request": {
       "model": "claude-opus-5-5",
@@ -22,7 +22,7 @@
           "holidays": []
         },
         "symbol": "DEMO1",
-        "asOf": "2026-10-14T02:30:00.000Z"
+        "asOf": "2026-10-14T03:15:00.000Z"
       }
     },
     "response": {
@@ -57,11 +57,11 @@
     "createdAt": "2026-10-14T03:15:00.000Z"
   },
   {
-    "key": "expert|DEMO2|thesis|2026-10-14T02:30:00.000Z|7719a14a56cef542",
+    "key": "expert|DEMO2|thesis|2026-10-14T03:15:00.000Z|7719a14a56cef542",
     "engine": "expert",
     "symbol": "DEMO2",
     "trigger": "thesis",
-    "asOf": "2026-10-14T02:30:00.000Z",
+    "asOf": "2026-10-14T03:15:00.000Z",
     "promptHash": "7719a14a56cef542",
     "request": {
       "model": "claude-opus-5-5",
@@ -79,7 +79,7 @@
           "holidays": []
         },
         "symbol": "DEMO2",
-        "asOf": "2026-10-14T02:30:00.000Z"
+        "asOf": "2026-10-14T03:15:00.000Z"
       }
     },
     "response": {
