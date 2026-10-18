@@ -13,6 +13,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS archived_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS model_calls (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL, usage TEXT);
+      CREATE TABLE IF NOT EXISTS daily_report (day TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS kite_session (id INTEGER PRIMARY KEY CHECK(id=1), access_token TEXT NOT NULL, user_id TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, instruments TEXT NOT NULL);`);
     if (!this.db.prepare('PRAGMA table_info(state)').all().some(column => column.name === 'revision')) this.db.exec('ALTER TABLE state ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
     this.revision = this.db.prepare('SELECT revision FROM state WHERE id=1').get()?.revision ?? 0;
@@ -88,6 +89,11 @@ export class Store {
     const row = this.db.prepare('SELECT * FROM kite_session WHERE id=1').get();
     return row ? { accessToken: row.access_token, userId: row.user_id, issuedAt: row.issued_at, expiresAt: row.expires_at, instruments: JSON.parse(row.instruments) } : null;
   }
+  saveDailyReport(day, payload) {
+    this.db.prepare('INSERT INTO daily_report(day,payload) VALUES(?,?) ON CONFLICT(day) DO UPDATE SET payload=excluded.payload').run(day, JSON.stringify(payload));
+  }
+  dailyReports() { return this.db.prepare('SELECT day,payload FROM daily_report ORDER BY day').all().map(row => ({ ...JSON.parse(row.payload), day: row.day })); }
+  hasDailyReport(day) { return Boolean(this.db.prepare('SELECT 1 FROM daily_report WHERE day=?').get(day)); }
   clearKiteSession() { this.db.prepare('DELETE FROM kite_session WHERE id=1').run(); }
   audit() { return this.db.prepare('SELECT * FROM audit ORDER BY id').all().map(row => ({ ...row, payload: JSON.parse(row.payload) })); }
   archiveCount() { return this.db.prepare('SELECT COUNT(*) AS count FROM archived_runs').get().count; }

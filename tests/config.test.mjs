@@ -33,3 +33,8 @@ test('universe and bar size are validated', () => {
   for (const bad of [{ universe: [] }, { universe: ['bad symbol'] }, { universe: Array.from({ length: 21 }, (_, i) => `S${i}`) }, { universe: 'INFY' }, { barMinutes: 7 }])
     assert.throws(() => validateSettings(bad), /universe|barMinutes/);
 });
+test('fixed monthly costs and spend cap are validated', () => {
+  assert.equal(DEFAULT_SETTINGS.simulation.fixedCostsPerMonthInr, 1100); assert.equal(DEFAULT_SETTINGS.simulation.spendCapPerMonthInr, 1200);
+  assert.equal(validateSettings({ simulation: { fixedCostsPerMonthInr: 0 } }).simulation.fixedCostsPerMonthInr, 0);
+  for (const bad of [-1, 100001, NaN]) assert.throws(() => validateSettings({ simulation: { spendCapPerMonthInr: bad } }), /spendCapPerMonthInr/);
+});

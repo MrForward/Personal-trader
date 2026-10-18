@@ -42,8 +42,8 @@ export class KiteSession {
   }
   status() {
     const saved = this.store.loadKiteSession();
-    if (!saved) return { state: 'none', userId: null, expiresAt: null, instruments: {} };
-    return { state: this.now() < Date.parse(saved.expiresAt) ? 'valid' : 'expired', userId: saved.userId, expiresAt: saved.expiresAt, instruments: saved.instruments };
+    if (!saved) return { state: 'none', userId: null, issuedAt: null, expiresAt: null, instruments: {} };
+    return { state: this.now() < Date.parse(saved.expiresAt) ? 'valid' : 'expired', userId: saved.userId, issuedAt: saved.issuedAt, expiresAt: saved.expiresAt, instruments: saved.instruments };
   }
   invalidate() {
     const saved = this.store.loadKiteSession();

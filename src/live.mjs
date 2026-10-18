@@ -25,6 +25,10 @@ export class LiveRunner {
   async start() {
     this.stopTimers();
     const session = this.calendar(this.now());
+    if (session && this.now() >= session.closeMs && this.isLive() && !this.engine.store.hasDailyReport(session.day)) {
+      if (session.day !== this.day) this.resetDay(session.day);
+      this.writeReport();
+    }
     if (!session || this.now() >= session.closeMs) { this.state = 'idle'; return this.status(); }
     if (this.session.status().state !== 'valid') { this.state = 'login-needed'; return this.status(); }
     if (session.day !== this.day) this.resetDay(session.day);
@@ -96,7 +100,7 @@ export class LiveRunner {
     if (this.state === 'live' && this.builder) {
       const row = this.builder.flush(now);
       if (row) this.handleRow(row);
-      if (!this.builder.current && now >= this.sessionWindow.closeMs + FLUSH_GRACE_MS) { this.state = 'closed'; this.stopTimers(); this.source.stop(); }
+      if (!this.builder.current && now >= this.sessionWindow.closeMs + FLUSH_GRACE_MS) { this.state = 'closed'; this.stopTimers(); this.source.stop(); this.writeReport(); }
     } else if (this.state === 'disconnected' && this.builder) {
       // No prices means no protection: record each bar period that passed without data instead of fabricating a bar.
       this.gapBarEnd ??= this.builder.current?.end ?? now;
@@ -115,6 +119,13 @@ export class LiveRunner {
     this.state = 'disconnected';
     const delay = Math.min(2 ** this.reconnects++, MAX_BACKOFF_S) * 1000;
     this.later(() => { if (this.state === 'disconnected') this.connect(); }, delay);
+  }
+  writeReport() {
+    const c = this.status().counters, day = this.day;
+    const dataQuality = { ticks: c.ticks, dropped: c.dropped ?? 0, outsideSession: c.outsideSession ?? 0, thinBars: c.thinBars ?? 0, badTicks: c.badTicks,
+      rejectedRows: c.rejectedRows, disconnects: c.disconnects, barsToday: this.barsToday, skewed: this.skewed, loginAt: this.session.status().issuedAt ?? null };
+    dataQuality.flagged = dataQuality.thinBars > 0.2 * this.barsToday || dataQuality.dropped > 0.01 * dataQuality.ticks || dataQuality.skewed || dataQuality.rejectedRows > 0;
+    this.pending = this.pending.then(() => this.run(() => this.engine.dailyReport(day, dataQuality))).catch(error => this.log(`Daily report failed: ${error.message}`));
   }
   later(fn, ms) {
     if (this.intervalMs <= 0) return;

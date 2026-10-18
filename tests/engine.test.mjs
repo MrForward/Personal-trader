@@ -273,3 +273,27 @@ test('catchUp fast-forwards over missed bars without decisions; the next open ap
   await liveStep(engine);
   assert.equal(engine.state.positions.length, 0); assert.equal(engine.state.trades.at(-1).reason, 'Gap protective stop'); assert.equal(engine.state.trades.at(-1).price, 130);
 });
+
+test('dailyReport computes fixed costs per trading day and net after fixed costs', t => {
+  const { engine, store } = fixture(t);
+  engine.settings({ simulation: { fixedCostsPerMonthInr: 2100 } });
+  engine.beginLive({ rows: rows(['A'], 40), assets: liveAssets, source: 'test live' });
+  const bar = (iso, source = 'ticks') => engine.appendBar({ timestamp: iso, source, bars: { A: { open: 140, high: 141, low: 139, close: 140, volume: 1 } } });
+  bar('2026-10-13T04:00:00Z'); bar('2026-10-14T04:00:00Z'); bar('2026-10-14T04:15:00Z', 'thin');
+  const report = engine.dailyReport('2026-10-14', { ticks: 10, flagged: false });
+  assert.equal(report.fixedCostsToDate, 200); assert.equal(report.monthToDateFixedCosts, 200); assert.equal(report.spendCap, 1200);
+  assert.equal(report.netAfterFixedCosts, Math.round((report.equity - 1000 - 200) * 100) / 100);
+  assert.equal(report.mode, 'prospective-paper'); assert.deepEqual(report.dataQuality, { ticks: 10, flagged: false });
+  assert.deepEqual(store.dailyReports().map(row => row.day), ['2026-10-14']);
+  engine.dailyReport('2026-10-14', { ticks: 11, flagged: true });
+  assert.equal(store.dailyReports().length, 1); assert.equal(store.dailyReports()[0].dataQuality.ticks, 11);
+});
+
+test('a live run stays live after each step and replay controls are refused', async t => {
+  const { engine } = fixture(t);
+  engine.beginLive({ rows: rows(['A'], 40), assets: liveAssets, source: 'test live' });
+  assert.equal(engine.state.status, 'live');
+  engine.appendBar(bar40()); await liveStep(engine);
+  assert.equal(engine.state.status, 'live');
+  assert.throws(() => engine.control('start'), /driven by the live feed/);
+});

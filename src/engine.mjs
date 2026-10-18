@@ -78,6 +78,7 @@ export class TradingEngine {
     this.state.settings.risk.maxDailyLossPct ??= DEFAULT_SETTINGS.risk.maxDailyLossPct;
     this.state.settings.universe ??= DEFAULT_SETTINGS.universe; this.state.settings.barMinutes ??= DEFAULT_SETTINGS.barMinutes;
     this.state.settings.simulation.costSchedule ??= DEFAULT_SETTINGS.simulation.costSchedule; delete this.state.settings.simulation.feeBps;
+    this.state.settings.simulation.fixedCostsPerMonthInr ??= DEFAULT_SETTINGS.simulation.fixedCostsPerMonthInr; this.state.settings.simulation.spendCapPerMonthInr ??= DEFAULT_SETTINGS.simulation.spendCapPerMonthInr;
     this.state.cappedBenchmark ??= benchmark(this.state.settings.simulation.startingCapital, true);
     this.state.riskLatched ??= this.state.status === 'risk-paused';
     this.state.sessionDay ??= sessionDay(this.state.dataset[this.state.cursor].timestamp);
@@ -166,6 +167,7 @@ export class TradingEngine {
       return this.commit(fresh, 'reset', { runId: fresh.runId }, { archive: this.state });
     }
     if (next.persistenceFault) throw new Error('Reload or reset after the storage failure before resuming.');
+    if (next.mode === 'prospective-paper' && (action === 'start' || action === 'pause')) throw new Error('This run is driven by the live feed; reset to return to replay.');
     if (action === 'start') {
       checkRisk(next, next.dataset[next.cursor]);
       if (next.riskLatched) throw new Error('Loss cap is latched. Protective steps remain available; reset before a new experiment.');
@@ -188,7 +190,7 @@ export class TradingEngine {
     // Warmup rows come from the broker; validate them like an import. Every warmup row is historical by definition.
     const dataset = validateDataset(rows.map(({ source: _source, ...row }) => row)).rows.map(row => ({ ...row, source: 'historical' }));
     const fresh = newState(this.state.settings, dataset, assets, source, []);
-    fresh.mode = 'prospective-paper'; fresh.cursor = dataset.length - 1;
+    fresh.mode = 'prospective-paper'; fresh.status = 'live'; fresh.cursor = dataset.length - 1;
     fresh.sessionDay = sessionDay(dataset[fresh.cursor].timestamp);
     return this.commit(fresh, 'live-begin', { runId: fresh.runId, source, rows: dataset.length, symbols: assets.map(asset => asset.symbol) }, { archive: this.state });
   }); }
@@ -371,12 +373,29 @@ export class TradingEngine {
       for (const { decision } of proposals) s.decisions.push(decision);
       s.cursor += 1; checkRisk(s, next);
       s.equityHistory.push({ timestamp: next.timestamp, equity: s.metrics.equity, benchmarkEquity: s.metrics.benchmarkEquity, cappedBenchmarkEquity: s.metrics.cappedBenchmarkEquity });
-      if (!s.riskLatched && s.cursor >= s.dataset.length - 1) s.status = 'complete';
+      if (!s.riskLatched && s.mode !== 'prospective-paper' && s.cursor >= s.dataset.length - 1) s.status = 'complete';
       return this.commit(s, 'step', { runId: s.runId, fromCursor: this.state.cursor, cursor: s.cursor, decisions: proposals.map(p => p.decision.id), phases: ['open exits', 'all open entries', 'intrabar exits', 'next-bar trailing update'] });
     } catch (error) {
       if (storageFailure(error) && !this.state.persistenceFault) { this.state.status = 'error-paused'; this.state.persistenceFault = true; this.state.lastError = 'Persistent storage failed; no paper step was retained. Reload or reset before continuing.'; }
       throw error;
     }
   }); }
+  // shortcut: fixed costs prorated over 21 trading days a month; use actual invoices if a month's count matters.
+  dailyReport(day, dataQuality = {}) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error('Report day must be YYYY-MM-DD.');
+    const s = this.state, sim = s.settings.simulation, perDay = sim.fixedCostsPerMonthInr / 21;
+    const liveDays = [...new Set(s.dataset.filter(row => row.source === 'ticks' || row.source === 'thin').map(row => sessionDay(row.timestamp)))].filter(d => d <= day);
+    const fixedCostsToDate = money(perDay * liveDays.length), monthToDateFixedCosts = money(perDay * liveDays.filter(d => d.slice(0, 7) === day.slice(0, 7)).length);
+    const m = s.metrics;
+    const payload = { day, mode: s.mode, runId: s.runId, configVersion: s.settings.version,
+      equity: m.equity, cash: m.cash, realizedPnl: m.realizedPnl, unrealizedPnl: m.unrealizedPnl, fees: m.fees,
+      positions: s.positions.map(p => ({ symbol: p.symbol, quantity: p.quantity, stopPrice: p.stopPrice, markPrice: p.markPrice })),
+      tradesToday: s.trades.filter(trade => sessionDay(trade.timestamp) === day),
+      benchmarkEquity: m.benchmarkEquity, cappedBenchmarkEquity: m.cappedBenchmarkEquity,
+      tradingDays: liveDays.length, fixedCostsToDate, monthToDateFixedCosts, spendCap: sim.spendCapPerMonthInr,
+      netAfterFixedCosts: money(m.equity - sim.startingCapital - fixedCostsToDate), dataQuality: clone(dataQuality) };
+    this.store.saveDailyReport(day, payload);
+    return payload;
+  }
   export() { return clone({ exportedAt: new Date().toISOString(), ...this.state, audit: this.store.audit(), archivedRuns: this.store.archiveCount(), disclaimer: 'Paper execution only. OHLC fills are modeled, not live exchange fills; results are not a profitability claim.' }); }
 }

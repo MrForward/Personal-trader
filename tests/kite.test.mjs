@@ -20,7 +20,7 @@ test('complete stores session, instruments and expiry at next 06:00 IST', async 
   assert.equal(session.status().state, 'none');
   const result = await session.complete('reqtoken123', ['A', 'B']);
   assert.deepEqual(result, { userId: 'AB1234', expiresAt: '2026-10-28T00:30:00.000Z' });
-  assert.deepEqual(session.status(), { state: 'valid', userId: 'AB1234', expiresAt: '2026-10-28T00:30:00.000Z', instruments: { A: 1, B: 2 } });
+  assert.deepEqual(session.status(), { state: 'valid', userId: 'AB1234', issuedAt: '2026-10-27T04:00:00.000Z', expiresAt: '2026-10-28T00:30:00.000Z', instruments: { A: 1, B: 2 } });
   assert.equal(client.accessToken, ACCESS_TOKEN);
   assert.equal(store.loadKiteSession().accessToken, ACCESS_TOKEN);
 });

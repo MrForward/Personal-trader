@@ -126,6 +126,7 @@ export function createApplication({
       if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, { ok: true, mode: engine.state.mode, liveTrading: false, paidModelCallsEnabled: allowPaidModelCalls,
         networkNewsConnected: false, kite: kiteSession?.status().state ?? 'unconfigured', lastTickAt: runner?.status().lastTickAt ?? null });
       if (req.method === 'GET' && url.pathname === '/api/kite/status') return json(res, 200, kiteStatus());
+      if (req.method === 'GET' && url.pathname === '/api/reports') return json(res, 200, await serial(() => store.dailyReports()));
       if (req.method === 'GET' && kiteSession && url.pathname === '/kite/login') { res.writeHead(302, { location: kiteSession.loginUrl() }); res.end(); return; }
       if (req.method === 'GET' && kiteSession && url.pathname === '/kite/callback') {
         // Kite redirects here cross-site by design; the one-time request token from the owner's login is the authority.

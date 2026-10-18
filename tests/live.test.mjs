@@ -147,3 +147,23 @@ test('persistence error stops the runner and calls onFatal', async t => {
   await runner.start(); await runner.idle();
   assert.equal(fatal?.code, 'PERSISTENCE_ERROR'); assert.equal(runner.status().state, 'idle');
 });
+
+test('closing the session writes the daily report with data quality', async t => {
+  let handlers;
+  const { runner, clock, store } = setup(t, { source: { start: h => { handlers = h; }, stop: () => {} } });
+  await runner.start();
+  handlers.onTick({ symbol: 'DEMO1', price: 100, cumulativeVolume: 1, exchangeTime: T('2026-10-14T09:50:00Z') });
+  clock.now = T('2026-10-14T10:00:31Z'); runner.poll(); await runner.idle(); runner.poll(); await runner.idle();
+  const [report] = store.dailyReports();
+  assert.equal(report.day, '2026-10-14'); assert.equal(report.dataQuality.ticks, 1); assert.equal(report.dataQuality.thinBars, 1);
+  assert.equal(report.dataQuality.flagged, true);
+  runner.poll(); await runner.idle(); assert.equal(store.dailyReports().length, 1);
+});
+
+test('starting after the close writes a missing report once and stays idle', async t => {
+  const store = new Store(':memory:'); t.after(() => store.close());
+  const first = setup(t, { store }); await first.runner.start(); await first.runner.idle(); first.runner.stop();
+  const later = setup(t, { store, clockStart: T('2026-10-14T11:00:00Z') });
+  await later.runner.start(); await later.runner.idle();
+  assert.equal(later.runner.status().state, 'idle'); assert.deepEqual(store.dailyReports().map(row => row.day), ['2026-10-14']);
+});

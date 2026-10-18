@@ -5,6 +5,7 @@ const titles = {
   strategies: ['Strategy workspace', 'Transparent candidates for a paper experiment.'],
   configuration: ['Configuration', 'Set the model, strategy and risk boundaries.'],
   journal: ['Decision journal', 'Evidence, counter-evidence and execution outcomes.'],
+  reports: ['Daily reports', 'Paper results against buy-and-hold, after charges and fixed costs.'],
 };
 const money = value => Number.isFinite(value) ? new Intl.NumberFormat('en-IN', { style: 'currency', currency: state.snapshot?.currency || 'INR', maximumFractionDigits: 2 }).format(value) : '—';
 const percentage = (value, signed = false) => Number.isFinite(value) ? `${signed && value > 0 ? '+' : ''}${value.toFixed(2)}%` : '—';
@@ -83,7 +84,7 @@ async function mutate(path, body, success, method = 'POST') {
   finally { state.busy = false; updateControls(); }
 }
 function applySnapshot(snapshot) {
-  if (snapshot.mode !== 'paper' || !snapshot.settings || !snapshot.metrics) throw new Error('The server did not return a valid paper workspace.');
+  if (!['paper', 'prospective-paper'].includes(snapshot.mode) || !snapshot.settings || !snapshot.metrics) throw new Error('The server did not return a valid paper workspace.');
   const fingerprint = JSON.stringify(snapshot);
   const changed = fingerprint !== state.fingerprint;
   state.snapshot = snapshot; state.fingerprint = fingerprint; $('connection-error').hidden = true;
@@ -94,7 +95,7 @@ function applySnapshot(snapshot) {
 }
 function updateControls(disconnected = false) {
   const s = state.snapshot; const unavailable = !s || state.busy || disconnected || !$('connection-error').hidden;
-  const ended = s?.status === 'complete' || s?.status === 'error-paused';
+  const ended = s?.status === 'complete' || s?.status === 'error-paused' || s?.mode === 'prospective-paper';
   const riskPaused = s?.status === 'risk-paused';
   $('start-button').disabled = unavailable || ended || riskPaused;
   $('step-button').disabled = unavailable || ended || s?.status === 'running';
@@ -125,10 +126,10 @@ function meter(id, current, limit) {
 }
 function renderOverview() {
   const s = state.snapshot, m = s.metrics, r = s.settings.risk;
-  const synthetic = s.dataSource === 'synthetic demo';
-  text('data-source-label', s.dataSource); text('sidebar-source', synthetic ? 'Synthetic prices.' : 'Imported history.');
-  text('market-description', synthetic ? 'Fictional DEMO instruments · synthetic replay prices' : `Historical replay from ${s.dataSource}`);
-  text('market-source', synthetic ? 'SYNTHETIC DEMO' : 'IMPORTED REPLAY');
+  const synthetic = s.dataSource === 'synthetic demo', live = s.mode === 'prospective-paper';
+  text('data-source-label', s.dataSource); text('sidebar-source', live ? 'Live NSE prices, simulated fills.' : synthetic ? 'Synthetic prices.' : 'Imported history.');
+  text('market-description', live ? 'Live NSE prices from Kite · closed bars only' : synthetic ? 'Fictional DEMO instruments · synthetic replay prices' : `Historical replay from ${s.dataSource}`);
+  text('market-source', live ? 'LIVE PAPER' : synthetic ? 'SYNTHETIC DEMO' : 'IMPORTED REPLAY');
   text('run-status', s.status.replaceAll('-', ' ')); $('run-status').className = `run-badge ${s.status}`;
   text('simulation-time', `${date(s.run?.timestamp, true)} IST`); text('run-progress', `${numeric((s.run?.cursor ?? 0) + 1)} / ${numeric(s.run?.total)} observations`);
   text('equity-value', money(m.equity)); text('net-return', `${percentage(m.netReturnPct, true)} net return`); changeColor($('net-return'), m.netReturnPct);
@@ -284,6 +285,7 @@ function renderConfiguration() {
     document.querySelectorAll('input[name=enabled]').forEach(input => { input.checked = settings.strategy.enabled.includes(input.value); });
     for (const [name, value] of Object.entries(settings.risk)) if (formValue(name)) formValue(name).value = value;
     for (const [name, value] of Object.entries(settings.simulation)) if (formValue(name)) formValue(name).value = value;
+    formValue('universe').value = settings.universe.join(', '); formValue('barMinutes').value = settings.barMinutes;
     state.formVersion = settings.version;
   }
   const started = s.run.cursor > 29 || s.trades.length > 0;
@@ -358,11 +360,23 @@ function openStop(id) {
   text('stop-hint', `Enter at least ${money(minimum)} and less than the current mark. The server checks the latest price before applying.`);
   $('stop-error').hidden = true; $('stop-dialog').showModal();
 }
+async function renderReports() {
+  let reports;
+  try { reports = await api('/api/reports'); } catch (error) { replace('reports-body', [node('tr', '', node('td', 'empty-cell', error.message))]); return; }
+  text('reports-count', `${reports.length} days`);
+  if (!reports.length) { replace('reports-body', [(() => { const row = node('tr', ''); const cell = node('td', 'empty-cell', 'No daily report yet. One is written after each live session closes.'); cell.colSpan = 7; row.append(cell); return row; })()]); return; }
+  replace('reports-body', [...reports].reverse().map(r => {
+    const row = node('tr', '');
+    for (const value of [r.day, money(r.equity), money(r.benchmarkEquity), money(r.fixedCostsToDate), money(r.netAfterFixedCosts), String(r.tradesToday.length), r.dataQuality?.flagged ? 'Flagged' : 'OK']) row.append(node('td', '', value));
+    return row;
+  }));
+}
 function navigate() {
   const requested = location.hash.slice(1), view = Object.hasOwn(titles, requested) ? requested : 'overview';
   for (const id of Object.keys(titles)) $('view-' + id).hidden = id !== view;
   document.querySelectorAll('[data-view]').forEach(link => { if (link.dataset.view === view) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
   text('page-title', titles[view][0]); text('page-description', titles[view][1]);
+  if (view === 'reports') void renderReports();
   $('sidebar').classList.remove('open'); $('menu-button').setAttribute('aria-expanded', 'false'); $('menu-button').setAttribute('aria-label', 'Open navigation');
 }
 $('menu-button').addEventListener('click', () => { const open = $('sidebar').classList.toggle('open'); $('menu-button').setAttribute('aria-expanded', open); $('menu-button').setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation'); });
@@ -392,7 +406,8 @@ $('settings-form').addEventListener('submit', async event => {
   const risk = Object.fromEntries(Object.keys(state.snapshot.settings.risk).filter(name => formValue(name)).map(name => [name, Number(formValue(name).value)]));
   if (risk.maxPositionPct > risk.maxExposurePct) { announce('Maximum position cannot exceed maximum exposure.', true); formValue('maxPositionPct').focus(); return; }
   const provider = formValue('provider').value;
-  const payload = { model: { provider, model: provider === 'rules' ? '' : formValue('model').value.trim(), maxOutputTokens: Number(formValue('maxOutputTokens').value), timeoutMs: Number(formValue('timeoutMs').value), dailyCallLimit: Number(formValue('dailyCallLimit').value) }, strategy: { mode, enabled }, risk, simulation: { startingCapital: $('capital-input').disabled ? state.snapshot.settings.simulation.startingCapital : Number(formValue('startingCapital').value), slippageBps: Number(formValue('slippageBps').value), costSchedule: formValue('costSchedule').value } };
+  const payload = { model: { provider, model: provider === 'rules' ? '' : formValue('model').value.trim(), maxOutputTokens: Number(formValue('maxOutputTokens').value), timeoutMs: Number(formValue('timeoutMs').value), dailyCallLimit: Number(formValue('dailyCallLimit').value) }, strategy: { mode, enabled }, risk, simulation: { startingCapital: $('capital-input').disabled ? state.snapshot.settings.simulation.startingCapital : Number(formValue('startingCapital').value), slippageBps: Number(formValue('slippageBps').value), costSchedule: formValue('costSchedule').value, fixedCostsPerMonthInr: Number(formValue('fixedCostsPerMonthInr').value), spendCapPerMonthInr: Number(formValue('spendCapPerMonthInr').value) },
+    universe: formValue('universe').value.split(',').map(symbol => symbol.trim().toUpperCase()).filter(Boolean), barMinutes: Number(formValue('barMinutes').value) };
   try { const result = await mutate('/api/settings', payload, 'Configuration applied. Open-position stops and targets are retained.'); if (result) { state.formDirty = false; renderConfiguration(); updateControls(); } } catch {}
 });
 $('cancel-stop').addEventListener('click', () => $('stop-dialog').close());

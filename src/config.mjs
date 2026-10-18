@@ -6,7 +6,7 @@ export const DEFAULT_SETTINGS = {
   model: { provider: 'rules', model: '', maxOutputTokens: 1000, timeoutMs: 15000, dailyCallLimit: 30 },
   strategy: { mode: 'auto', enabled: ['momentum', 'mean_reversion'] },
   risk: { stopLossPct: 2, takeProfitPct: 4, trailingStopPct: 0, maxPositionPct: 25, maxExposurePct: 60, maxDrawdownPct: 8, maxDailyLossPct: 3, riskPerTradePct: 0.5 },
-  simulation: { startingCapital: 9000, slippageBps: 10, costSchedule: 'zerodha-cnc-2026-10' },
+  simulation: { startingCapital: 9000, slippageBps: 10, costSchedule: 'zerodha-cnc-2026-10', fixedCostsPerMonthInr: 1100, spendCapPerMonthInr: 1200 },
   // shortcut: placeholder universe of liquid NSE names, replace when the owner confirms the list (GOAL.md: under ₹1,500/share).
   universe: ['RELIANCE', 'INFY', 'HDFCBANK', 'ICICIBANK', 'ITC', 'SBIN', 'WIPRO', 'ONGC', 'COALINDIA', 'TATASTEEL'],
   barMinutes: 15,
@@ -51,7 +51,7 @@ export function validateSettings(input, previous = DEFAULT_SETTINGS) {
   }
   if (risk.maxPositionPct > risk.maxExposurePct) throw new Error('Position allocation cannot exceed total exposure.');
   const simulation = {};
-  for (const [key, min, max] of [['startingCapital', 100, 10000000], ['slippageBps', 0, 500]]) {
+  for (const [key, min, max] of [['startingCapital', 100, 10000000], ['slippageBps', 0, 500], ['fixedCostsPerMonthInr', 0, 100000], ['spendCapPerMonthInr', 0, 100000]]) {
     const value = input.simulation?.[key] ?? previous.simulation[key];
     if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) throw new Error(`${key} must be between ${min} and ${max}.`);
     simulation[key] = value;

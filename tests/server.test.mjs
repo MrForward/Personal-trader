@@ -122,3 +122,11 @@ test('health reports mode and kite state', async t => {
   const health = await (await fetch(base + '/api/health')).json();
   assert.equal(health.mode, 'paper'); assert.equal(health.kite, 'none'); assert.equal(health.liveTrading, false); assert.equal(health.lastTickAt, null);
 });
+
+test('reports route returns saved daily reports', async t => {
+  const { app, base } = await workspace(t);
+  assert.deepEqual(await (await fetch(base + '/api/reports')).json(), []);
+  app.engine.dailyReport('2026-10-14', { ticks: 0, flagged: false });
+  const reports = await (await fetch(base + '/api/reports')).json();
+  assert.equal(reports.length, 1); assert.equal(reports[0].day, '2026-10-14');
+});
