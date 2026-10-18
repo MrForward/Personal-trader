@@ -22,6 +22,16 @@ The goal is restated in [GOAL.md](GOAL.md). Phase 1 (prospective paper trading o
 
 **Verification:** `npm test` passes (unit, integration and a recorded-tick replay that reproduces the ledger exactly); `npm run typecheck` passes; the dashboard was checked in a browser in replay and live modes. **Not verified:** any real Kite login, live tick stream or VPS deploy; that is Task 10 and needs the owner's Kite app and Lightsail instance. The default universe is a placeholder until the owner confirms it.
 
+### Task 10 progress — 18 October 2026
+
+Running on the owner's Mac while the AWS account finishes activating:
+- [x] Kite Connect app created; key/secret in the git-ignored local `.env`.
+- [x] Kite login through `/kite/login` works; session valid until 06:00 IST; all 10 default symbols resolve on NSE.
+- [x] Restart keeps state and the Kite session (no new login needed).
+- [x] Backup script copies the database; the copy restores with the same run, session and audit rows.
+- [ ] First live session (Monday 19 Oct): header switches to LIVE PAPER, ticks arrive from 09:15, first decision around 09:30, daily report after 15:30.
+- [ ] Deploy to AWS Lightsail Mumbai (waiting on account activation; $100 sign-up + $20 budget credits on the account).
+
 ## Earlier checkpoint — 16 October 2026
 
 The local paper dashboard now has a Node server, browser controls, persistent SQLite ledger, configurable strategies/risk settings, model profiles with paid calls disabled by default, replay/import/export, and captured-intelligence display/import. The optional eve diagnostic agent has a single read-only snapshot tool; shell and file defaults are disabled. The dashboard is loopback-only. No live feed, news API, TradingView account, Zerodha account, paid model call, subscription, VM or real order is connected.
