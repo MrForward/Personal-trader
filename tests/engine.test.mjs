@@ -207,3 +207,49 @@ test('DP charge applies once per scrip per session day and fills are labelled', 
   assert.equal(sells.length, 2); approx(sells[0].fee - sells[1].fee, 15.34);
   assert.equal(sells[0].fill, 'assumed-open'); assert.equal(sells[0].charges.dp, 15.34); assert.equal(sells[1].charges.dp, 0);
 });
+
+const liveAssets = [{ symbol: 'A', name: 'A', sector: 'Test' }];
+const bar40 = (source = 'ticks', bars = { A: { open: 140, high: 142, low: 139, close: 141, volume: 1000 } }) => ({ timestamp: new Date(Date.UTC(2020, 0, 1, 9, 40 * 5)).toISOString(), closed: true, source, bars });
+const liveStep = (engine, extra = {}) => engine.step({ runId: engine.state.runId, expectedCursor: engine.state.cursor, ...extra });
+
+test('beginLive sets prospective-paper mode and makes no decisions on historical bars', t => {
+  const { engine, store } = fixture(t);
+  engine.beginLive({ rows: rows(['A'], 40), assets: liveAssets, source: 'test live' });
+  assert.equal(engine.state.mode, 'prospective-paper'); assert.equal(engine.state.cursor, 39);
+  assert.equal(engine.state.decisions.length, 0); assert.equal(engine.state.dataSource, 'test live');
+  assert.ok(engine.state.dataset.every(row => row.source === 'historical')); assert.equal(store.archiveCount(), 2);
+  assert.equal(engine.snapshot().mode, 'prospective-paper');
+});
+
+test('appendBar then step decides once and fills at the appended bar open', async t => {
+  const { engine } = fixture(t);
+  engine.beginLive({ rows: rows(['A'], 40), assets: liveAssets, source: 'test live' });
+  engine.appendBar(bar40()); assert.equal(engine.state.dataset.length, 41); assert.equal(engine.state.cursor, 39);
+  await liveStep(engine);
+  assert.equal(engine.state.cursor, 40); assert.equal(engine.state.decisions.length, 1);
+  assert.equal(engine.state.decisions[0].executionTimestamp, bar40().timestamp);
+  assert.equal(engine.snapshot().run.lastBarSource, 'ticks');
+  for (const trade of engine.state.trades) assert.equal(trade.fill, 'observed-open');
+});
+
+test('appendBar rejects stale, duplicate, and missing-symbol rows without changing state', t => {
+  const { engine } = fixture(t);
+  engine.beginLive({ rows: rows(['A'], 40), assets: liveAssets, source: 'test live' });
+  const last = engine.state.dataset[39];
+  assert.throws(() => engine.appendBar({ ...bar40(), timestamp: last.timestamp }), /follow the last bar/);
+  assert.throws(() => engine.appendBar({ ...bar40(), timestamp: engine.state.dataset[10].timestamp }), /follow the last bar/);
+  assert.throws(() => engine.appendBar(bar40('ticks', { B: { open: 1, high: 1, low: 1, close: 1, volume: 0 } })), /every universe symbol/);
+  assert.throws(() => engine.appendBar(bar40('ticks', { A: { open: 140, high: 130, low: 139, close: 141, volume: 1000 } })), /Inconsistent OHLC/);
+  assert.equal(engine.state.dataset.length, 40); assert.equal(engine.store.load().dataset.length, 40);
+});
+
+test('blockEntries rejects buys with the given reason', async t => {
+  const { engine } = fixture(t);
+  engine.beginLive({ rows: rows(['A'], 40), assets: liveAssets, source: 'test live' });
+  engine.appendBar(bar40());
+  await liveStep(engine, { blockEntries: 'Data gap: waiting for clean bars' });
+  assert.equal(engine.state.positions.length, 0);
+  assert.equal(engine.state.decisions[0].action, 'BUY');
+  assert.equal(engine.state.decisions[0].outcome, 'Rejected: Data gap: waiting for clean bars');
+  await assert.rejects(() => liveStep(engine, { blockEntries: 5 }), /Invalid replay step identity/);
+});

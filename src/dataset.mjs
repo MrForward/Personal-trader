@@ -18,6 +18,19 @@ function timestamp(value, now) {
   return time;
 }
 
+export function validateBar(symbol, source, time, now = Date.now()) {
+  if (!object(source) || Object.keys(source).some(key => ![...FIELDS, 'timestamp', 'closed', 'isClosed'].includes(key))) throw new Error('Invalid or unknown bar field.');
+  for (const flag of ['closed', 'isClosed']) if (Object.hasOwn(source, flag) && source[flag] !== true) throw new Error('Only closed bars can be imported.');
+  if (Object.hasOwn(source, 'timestamp') && timestamp(source.timestamp, now) !== time) throw new Error('Bar timestamp must match its aligned row.');
+  const bar = { timestamp: new Date(time).toISOString(), closed: true };
+  for (const field of FIELDS) {
+    if (typeof source[field] !== 'number' || !Number.isFinite(source[field]) || source[field] < 0 || (field !== 'volume' && source[field] === 0)) throw new Error(`Invalid ${field} for ${symbol}.`);
+    bar[field] = source[field];
+  }
+  if (bar.high < Math.max(bar.open, bar.close) || bar.low > Math.min(bar.open, bar.close) || bar.low > bar.high) throw new Error(`Inconsistent OHLC for ${symbol}.`);
+  return bar;
+}
+
 export function validateDataset(rows, { now = Date.now() } = {}) {
   if (!Number.isFinite(now)) throw new Error('The dataset validation clock must be finite.');
   if (!Array.isArray(rows) || rows.length < 35 || rows.length > 5000) throw new Error('Provide between 35 and 5,000 aligned timestamps.');
@@ -35,19 +48,7 @@ export function validateDataset(rows, { now = Date.now() } = {}) {
     if (symbols && JSON.stringify(keys) !== JSON.stringify(symbols)) throw new Error('Every timestamp must contain all symbols; missing prices cannot be forward-filled here.');
     symbols ??= keys;
     const bars = {};
-    for (const symbol of keys) {
-      const source = row.bars[symbol];
-      if (!object(source) || Object.keys(source).some(key => ![...FIELDS, 'timestamp', 'closed', 'isClosed'].includes(key))) throw new Error('Invalid or unknown bar field.');
-      for (const flag of ['closed', 'isClosed']) if (Object.hasOwn(source, flag) && source[flag] !== true) throw new Error('Only closed bars can be imported.');
-      if (Object.hasOwn(source, 'timestamp') && timestamp(source.timestamp, now) !== time) throw new Error('Bar timestamp must match its aligned row.');
-      const bar = { timestamp: new Date(time).toISOString(), closed: true };
-      for (const field of FIELDS) {
-        if (typeof source[field] !== 'number' || !Number.isFinite(source[field]) || source[field] < 0 || (field !== 'volume' && source[field] === 0)) throw new Error(`Invalid ${field} for ${symbol}.`);
-        bar[field] = source[field];
-      }
-      if (bar.high < Math.max(bar.open, bar.close) || bar.low > Math.min(bar.open, bar.close) || bar.low > bar.high) throw new Error(`Inconsistent OHLC for ${symbol}.`);
-      bars[symbol] = bar;
-    }
+    for (const symbol of keys) bars[symbol] = validateBar(symbol, row.bars[symbol], time, now);
     return { timestamp: new Date(time).toISOString(), closed: true, bars };
   });
   return { rows: result, symbols, timestampMeaning: 'Each timestamp identifies a completed bar; decisions use only the closed prefix.' };

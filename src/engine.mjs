@@ -3,13 +3,14 @@ import { DEFAULT_SETTINGS, validateSettings } from './config.mjs';
 import { STRATEGIES, analyzeMarket, chooseStrategy, evaluateStrategy } from './strategies.mjs';
 import { makeDemoSeries, DEMO_ASSETS } from './demo-data.mjs';
 import { reviewMarket, providerStatus } from './models.mjs';
-import { validateDataset, parseCsv } from './dataset.mjs';
+import { validateDataset, parseCsv, validateBar } from './dataset.mjs';
 import { charges, perShareRate } from './costs.mjs';
 
 const money = n => Math.round(n * 100) / 100;
 const clone = value => structuredClone(value);
 const SESSION_TIMEZONE = 'Asia/Kolkata';
 const fillLabel = row => row.source === 'ticks' ? 'observed-open' : 'assumed-open';
+const BAR_SOURCES = new Set(['ticks', 'thin', 'historical']);
 const sessionDay = stamp => new Intl.DateTimeFormat('en-CA', { timeZone: SESSION_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(stamp));
 export const INITIAL_CURSOR = 29;
 
@@ -134,7 +135,7 @@ export class TradingEngine {
       decisions: s.decisions.slice(-300).reverse(), trades: s.trades.slice(-300).reverse(), strategies: STRATEGIES, providerStatus: providerStatus(),
       market: s.assets.map(asset => ({ ...asset, price: row.bars[asset.symbol].close,
         changePct: 100 * (row.bars[asset.symbol].close / s.dataset[s.cursor - 1].bars[asset.symbol].close - 1), regime: analyzeMarket(this.histories(asset.symbol)).regime })),
-      run: { cursor: s.cursor, total: s.dataset.length, timestamp: row.timestamp },
+      run: { cursor: s.cursor, total: s.dataset.length, timestamp: row.timestamp, lastBarSource: s.dataset.at(-1).source ?? null },
       modelUsage: { callsToday: this.store.callCount(), limit: s.settings.model.dailyCallLimit, resetTimezone: 'UTC', paidCallsEnabled: this.allowPaidCalls },
       intelligence: { contexts: s.assets.map(asset => ({ symbol: asset.symbol, ...this.intelligence(asset.symbol) })), mode: 'captured fixtures / imported evidence', networkConnected: false },
       benchmarks: { full: compare(full), capped: compare(capped) }, archivedRuns: this.store.archiveCount(),
@@ -179,6 +180,27 @@ export class TradingEngine {
     const name = typeof input.name === 'string' ? input.name.trim().slice(0, 100) : 'User dataset';
     const fresh = newState(this.state.settings, parsed.rows, parsed.symbols.map(symbol => ({ symbol, name: symbol, sector: 'Imported' })), `imported historical data: ${name}`, []);
     return this.commit(fresh, 'dataset-import', { name, timestamps: parsed.rows.length, symbols: parsed.symbols }, { archive: this.state });
+  }); }
+  beginLive({ rows, assets, source }) { return this.exclusive(() => {
+    if (!Array.isArray(rows) || rows.length <= INITIAL_CURSOR || !Array.isArray(assets) || !assets.length || typeof source !== 'string') throw new Error('Live start needs warmup rows, assets and a source label.');
+    // Warmup rows come from the broker; validate them like an import. Every warmup row is historical by definition.
+    const dataset = validateDataset(rows.map(({ source: _source, ...row }) => row)).rows.map(row => ({ ...row, source: 'historical' }));
+    const fresh = newState(this.state.settings, dataset, assets, source, []);
+    fresh.mode = 'prospective-paper'; fresh.cursor = dataset.length - 1;
+    fresh.sessionDay = sessionDay(dataset[fresh.cursor].timestamp);
+    return this.commit(fresh, 'live-begin', { runId: fresh.runId, source, rows: dataset.length, symbols: assets.map(asset => asset.symbol) }, { archive: this.state });
+  }); }
+  appendBar(row) { return this.exclusive(() => {
+    if (this.state.persistenceFault) throw new Error('Reload or reset after the storage failure.');
+    const last = this.state.dataset.at(-1);
+    if (!row || typeof row !== 'object' || typeof row.timestamp !== 'string' || !(Date.parse(row.timestamp) > Date.parse(last.timestamp))) throw new Error('Bar timestamp must follow the last bar.');
+    const symbols = this.state.assets.map(asset => asset.symbol).sort();
+    if (!row.bars || typeof row.bars !== 'object' || JSON.stringify(Object.keys(row.bars).sort()) !== JSON.stringify(symbols)) throw new Error('Bar must contain every universe symbol.');
+    const time = Date.parse(row.timestamp), timestamp = new Date(time).toISOString();
+    const bars = Object.fromEntries(symbols.map(symbol => [symbol, validateBar(symbol, row.bars[symbol], time)]));
+    const next = clone(this.state);
+    next.dataset.push({ timestamp, closed: true, source: BAR_SOURCES.has(row.source) ? row.source : 'assumed', bars });
+    return this.commit(next, 'bar-append', { timestamp, source: next.dataset.at(-1).source, total: next.dataset.length });
   }); }
   setIntelligence(records) { return this.exclusive(() => {
     if (!Array.isArray(records)) throw new Error('Intelligence records must be a validated array.');
@@ -254,7 +276,8 @@ export class TradingEngine {
     }
   }
   async step(options = {}) { return this.exclusiveAsync(async () => {
-    if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => !['runId', 'expectedCursor'].includes(key))
+    if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => !['runId', 'expectedCursor', 'blockEntries'].includes(key))
+      || options.blockEntries !== undefined && (typeof options.blockEntries !== 'string' || !options.blockEntries)
       || options.expectedCursor !== undefined && (!Number.isInteger(options.expectedCursor) || options.expectedCursor < INITIAL_CURSOR)
       || options.runId !== undefined && typeof options.runId !== 'string') throw new Error('Invalid replay step identity.');
     if (this.state.persistenceFault) throw new Error('Reload or reset after the storage failure before stepping.');
@@ -297,6 +320,7 @@ export class TradingEngine {
         const values = checkRisk(s, next, 'open');
         if (candidate.action !== 'BUY' || s.positions.some(p => p.symbol === asset.symbol)) continue;
         const intel = decision.inputSnapshot.intelligence;
+        if (options.blockEntries) { decision.outcome = `Rejected: ${options.blockEntries}`; continue; }
         if (s.riskLatched) { decision.outcome = 'Rejected: latched portfolio loss cap'; continue; }
         if (intel?.entryBlocked) { decision.outcome = `Rejected: intelligence veto (${(intel.blockReasons ?? intel.entryBlockReasons ?? ['entry blocked']).join('; ')})`; continue; }
         const bar = next.bars[asset.symbol], price = bar.open * (1 + s.settings.simulation.slippageBps / 10000), risk = s.settings.risk, schedule = s.settings.simulation.costSchedule;
