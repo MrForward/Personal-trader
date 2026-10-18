@@ -7,6 +7,8 @@ import { TradingEngine } from './engine.mjs';
 import { reviewMarket } from './models.mjs';
 import { intelligenceContext, makeDemoIntelligence, validateIntelligence } from './intelligence.mjs';
 import { redact } from './secrets.mjs';
+import { KiteSession } from './kite.mjs';
+import { LiveRunner } from './live.mjs';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const assets = new Map([
@@ -42,6 +44,8 @@ export function createApplication({
   dbPath = resolve(projectRoot, 'data/trading-lab.sqlite'),
   host = '127.0.0.1', port = 3000, autoStepMs = 1000,
   allowPaidModelCalls = false, reviewer = reviewMarket,
+  kite = { apiKey: process.env.KITE_API_KEY, apiSecret: process.env.KITE_API_SECRET },
+  captureDir, makeClient, makeTicker, liveOptions = {},
 } = {}) {
   if (!loopbackNames.has(host)) throw new Error('The personal dashboard must bind to loopback. Use an SSH tunnel for remote access.');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid listening port.');
@@ -67,21 +71,29 @@ export function createApplication({
       return reviewer(input);
     },
   });
-  const snapshot = () => {
-    const value = engine.snapshot();
-    value.providerStatus.paidCallsEnabled = allowPaidModelCalls;
-    value.intelligence ??= {
-      mode: 'captured fixtures / imported evidence', networkConnected: false,
-      contexts: value.market.map(asset => intelligenceProvider({ symbol: asset.symbol, asOf: value.run.timestamp })),
-    };
-    return value;
-  };
   // One writer: requests and replay ticks cannot race settings, state or the cursor.
   let queue = Promise.resolve();
   const serial = operation => {
     const result = queue.then(operation);
     queue = result.catch(() => {});
     return result;
+  };
+  let app;
+  const kiteSession = kite?.apiKey ? new KiteSession({ apiKey: kite.apiKey, apiSecret: kite.apiSecret, store,
+    ...(makeClient ? { makeClient } : {}), ...(makeTicker ? { makeTicker } : {}) }) : null;
+  const runner = kiteSession ? new LiveRunner({ engine, session: kiteSession, run: serial,
+    captureDir: captureDir ?? (dbPath === ':memory:' ? resolve(projectRoot, 'data/ticks') : resolve(dirname(dbPath), 'ticks')),
+    onFatal: error => { process.stderr.write(`Live runner stopped: ${redact(error.message)}\n`); process.exitCode = 1; void app?.close(); }, ...liveOptions }) : null;
+  const kiteStatus = () => kiteSession ? { configured: true, session: kiteSession.status(), runner: runner.status() } : { configured: false };
+  const snapshot = () => {
+    const value = engine.snapshot();
+    value.kite = { ...value.kite, ...kiteStatus() };
+    value.providerStatus.paidCallsEnabled = allowPaidModelCalls;
+    value.intelligence ??= {
+      mode: 'captured fixtures / imported evidence', networkConnected: false,
+      contexts: value.market.map(asset => intelligenceProvider({ symbol: asset.symbol, asOf: value.run.timestamp })),
+    };
+    return value;
   };
   let closing = false;
   const json = (res, status, value) => {
@@ -111,7 +123,18 @@ export function createApplication({
         res.writeHead(200, { 'content-type': contentType, 'cache-control': 'no-store' });
         res.end(content); return;
       }
-      if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, { ok: true, mode: 'paper', liveTrading: false, paidModelCallsEnabled: allowPaidModelCalls, networkNewsConnected: false });
+      if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, { ok: true, mode: engine.state.mode, liveTrading: false, paidModelCallsEnabled: allowPaidModelCalls,
+        networkNewsConnected: false, kite: kiteSession?.status().state ?? 'unconfigured', lastTickAt: runner?.status().lastTickAt ?? null });
+      if (req.method === 'GET' && url.pathname === '/api/kite/status') return json(res, 200, kiteStatus());
+      if (req.method === 'GET' && kiteSession && url.pathname === '/kite/login') { res.writeHead(302, { location: kiteSession.loginUrl() }); res.end(); return; }
+      if (req.method === 'GET' && kiteSession && url.pathname === '/kite/callback') {
+        // Kite redirects here cross-site by design; the one-time request token from the owner's login is the authority.
+        const token = url.searchParams.get('request_token') ?? '';
+        if (url.searchParams.get('status') !== 'success' || !/^[A-Za-z0-9]{10,64}$/.test(token)) return json(res, 400, { error: 'Kite login was not completed.' });
+        await serial(() => kiteSession.complete(token, engine.state.settings.universe));
+        void runner.start().catch(error => process.stderr.write(`Live start failed: ${redact(error.message)}\n`));
+        res.writeHead(302, { location: '/' }); res.end(); return;
+      }
       if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, await serial(snapshot));
       if (req.method === 'GET' && url.pathname === '/api/audit') return json(res, 200, await serial(() => store.audit()));
       if (req.method === 'GET' && url.pathname === '/api/export') {
@@ -160,21 +183,27 @@ export function createApplication({
     }).finally(() => { tickQueued = false; });
   }, autoStepMs) : null;
   interval?.unref();
-  return {
-    server, engine, store,
+  app = {
+    server, engine, store, runner, kiteSession,
     listen: () => new Promise((resolveListen, reject) => {
       server.once('error', reject);
-      server.listen(port, host, () => { server.off('error', reject); resolveListen(server.address()); });
+      server.listen(port, host, () => {
+        server.off('error', reject);
+        if (kiteSession?.status().state === 'valid') void runner.start().catch(error => process.stderr.write(`Live start failed: ${redact(error.message)}\n`));
+        resolveListen(server.address());
+      });
     }),
     async close() {
       if (closing) return;
       closing = true;
+      runner?.stop();
       if (interval) clearInterval(interval);
       if (server.listening) await new Promise(resolveClose => server.close(resolveClose));
       await queue;
       store.close();
     },
   };
+  return app;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

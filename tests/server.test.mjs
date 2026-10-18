@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createApplication } from '../src/server.mjs';
+import { ACCESS_TOKEN, fakeClient, fakeTicker } from './kite-fakes.mjs';
 
 async function workspace(t) {
   const app = createApplication({ dbPath: ':memory:', port: 0, autoStepMs: 0 });
@@ -72,4 +73,52 @@ test('model configuration does not enable provider spending', async t => {
 
 test('reject remote binding before opening storage or network', () => {
   assert.throws(() => createApplication({ host: '0.0.0.0', dbPath: ':memory:' }), /loopback/);
+});
+
+async function kiteWorkspace(t, { client = fakeClient({ symbols: ['RELIANCE', 'INFY', 'HDFCBANK', 'ICICIBANK', 'ITC', 'SBIN', 'WIPRO', 'ONGC', 'COALINDIA', 'TATASTEEL'] }), ticker = fakeTicker() } = {}) {
+  const app = createApplication({ dbPath: ':memory:', port: 0, autoStepMs: 0, kite: { apiKey: 'key', apiSecret: 'kite-api-secret' },
+    makeClient: () => client, makeTicker: () => ticker, liveOptions: { intervalMs: 0, calendar: () => null } });
+  const address = await app.listen(); t.after(() => app.close());
+  return { app, base: `http://127.0.0.1:${address.port}`, client, ticker };
+}
+const get = (url, headers = {}) => fetch(url, { redirect: 'manual', headers });
+
+test('kite status reports unconfigured without an api key', async t => {
+  const { base } = await workspace(t);
+  assert.deepEqual(await (await fetch(base + '/api/kite/status')).json(), { configured: false });
+  assert.equal((await (await fetch(base + '/api/health')).json()).kite, 'unconfigured');
+  assert.equal((await get(base + '/kite/login')).status, 404);
+});
+
+test('login redirects to the Kite login URL', async t => {
+  const { base } = await kiteWorkspace(t);
+  const response = await get(base + '/kite/login');
+  assert.equal(response.status, 302); assert.equal(response.headers.get('location'), 'https://kite.example/connect/login?api_key=key');
+});
+
+test('callback completes the session, starts the runner and redirects home without leaking the token', async t => {
+  const { base } = await kiteWorkspace(t);
+  const response = await get(base + '/kite/callback?request_token=reqtoken123&action=login&status=success', { 'sec-fetch-site': 'cross-site' });
+  assert.equal(response.status, 302); assert.equal(response.headers.get('location'), '/');
+  const raw = await (await fetch(base + '/api/kite/status')).text();
+  assert.equal(JSON.parse(raw).session.state, 'valid'); assert.equal(JSON.parse(raw).runner.state, 'idle');
+  assert.doesNotMatch(raw, new RegExp(ACCESS_TOKEN));
+  const state = await (await fetch(base + '/api/state')).text();
+  assert.doesNotMatch(state, new RegExp(ACCESS_TOKEN)); assert.equal(JSON.parse(state).kite.session.state, 'valid');
+  assert.doesNotMatch(await (await fetch(base + '/api/export')).text(), new RegExp(ACCESS_TOKEN));
+});
+
+test('callback with a bad or failed token returns 400 and leaves status none', async t => {
+  const { base } = await kiteWorkspace(t);
+  for (const query of ['request_token=badtoken000&status=success', 'request_token=reqtoken123&status=cancelled', 'request_token=has%20space&status=success']) {
+    const response = await get(`${base}/kite/callback?${query}`);
+    assert.equal(response.status, 400, query); assert.doesNotMatch(await response.text(), /kite-api-secret/);
+  }
+  assert.equal((await (await fetch(base + '/api/kite/status')).json()).session.state, 'none');
+});
+
+test('health reports mode and kite state', async t => {
+  const { base } = await kiteWorkspace(t);
+  const health = await (await fetch(base + '/api/health')).json();
+  assert.equal(health.mode, 'paper'); assert.equal(health.kite, 'none'); assert.equal(health.liveTrading, false); assert.equal(health.lastTickAt, null);
 });

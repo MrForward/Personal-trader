@@ -262,6 +262,18 @@ function renderJournal() {
   }) : [node('p', 'empty-state', decisions.length ? 'No decisions match this filter.' : 'No decisions yet. Run or step the paper replay to create a journal.')]);
 }
 function formValue(name) { return $('settings-form').elements.namedItem(name); }
+function kiteLabel(kite) {
+  if (!kite?.configured) return 'Not configured';
+  const { session, runner } = kite;
+  if (session.state !== 'valid' || runner.state === 'login-needed') return 'Login needed';
+  const time = value => new Date(value).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
+  const labels = {
+    live: `Live · last tick ${runner.lastTickAt ? time(runner.lastTickAt) : '—'} · ${runner.barsToday} bars today`,
+    disconnected: 'Disconnected, reconnecting', 'warming-up': 'Loading recent bars…', 'warmup-failed': 'Could not load recent bars; retrying',
+    closed: 'Market closed for today', idle: 'Market closed (weekend or holiday)',
+  };
+  return `${labels[runner.state] ?? runner.state} · session valid until ${time(session.expiresAt)} IST`;
+}
 function renderConfiguration() {
   const s = state.snapshot, settings = s.settings;
   text('config-version', `VERSION ${settings.version}`);
@@ -280,7 +292,9 @@ function renderConfiguration() {
   text('usage-hint', `${s.modelUsage.callsToday} / ${s.modelUsage.limit} calls today · resets in UTC`);
   updateProviderHint();
   text('import-current', `Current source: ${s.dataSource}`);
-  text('broker-description', s.kite?.connected ? 'Broker connection information is available, but this workspace still submits paper orders only.' : 'Kite is not connected. No broker credentials or real orders are used.');
+  text('broker-description', s.kite?.configured ? 'Live NSE prices from Kite feed the paper ledger. Orders are simulated; nothing is sent to the broker.' : 'Kite is not configured. No broker credentials or real orders are used.');
+  text('kite-state', kiteLabel(s.kite));
+  $('kite-login').hidden = !s.kite?.configured || !['none', 'expired'].includes(s.kite.session?.state);
   replace('broker-requirements', (s.kite?.requirements || []).map(item => node('li', '', readable(item))));
   replace('configuration-history', (s.configHistory || []).slice().reverse().map(item => {
     const entry = node('div', 'history-entry'); entry.append(node('strong', '', `Version ${item.version}`), node('span', '', item.note || 'Configuration applied'), node('span', '', date(item.timestamp, true))); return entry;
