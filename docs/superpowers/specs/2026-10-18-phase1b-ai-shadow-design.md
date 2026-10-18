@@ -1,3 +1,5 @@
+> **Superseded on 18 October 2026** by [the expert shadow design](2026-10-18-phase1b-expert-shadow-design.md); not to be implemented.
+
 # Phase 1b — AI shadow mode
 
 - **Date:** 18 October 2026, Asia/Kolkata

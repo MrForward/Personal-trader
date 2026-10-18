@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
-import { providerStatus, reviewMarket, validateModelConfig } from '../src/models.mjs';
+import { fileURLToPath } from 'node:url';
+import { existsSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { providerStatus, reviewMarket, runClaudeCode, schemaErrors, validateModelConfig } from '../src/models.mjs';
 
 const FAKE_OPENAI_KEY = 'test-openai-key-not-a-real-credential';
 const FAKE_ANTHROPIC_KEY = 'test-anthropic-key-not-a-real-credential';
@@ -44,10 +47,10 @@ const anthropicBody = (value = review(), overrides = {}) => ({
 });
 
 test('provider status exposes booleans only', () => {
-  assert.deepEqual(providerStatus(), { rules: true, openai: true, anthropic: true });
+  assert.deepEqual(providerStatus(), { rules: true, openai: true, anthropic: true, claudeCode: Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN) });
   delete process.env.OPENAI_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
-  assert.deepEqual(providerStatus(), { rules: true, openai: false, anthropic: false });
+  assert.deepEqual(providerStatus(), { rules: true, openai: false, anthropic: false, claudeCode: Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN) });
 });
 
 test('rules advisory review respects captured-entry veto and retains contrary evidence', async () => {
@@ -217,4 +220,76 @@ test('timeout covers a response body that stalls after headers arrive', async ()
     model: config('anthropic'), context: context(),
     fetchImpl: async () => ({ ok: true, text: () => new Promise(() => {}) }),
   }), /timed out/);
+});
+
+const FAKE = fileURLToPath(new URL('./fixtures/fake-claude.mjs', import.meta.url));
+const ccSchema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false };
+const ccRun = (mode, extra = {}, envExtra = {}) => runClaudeCode({ model: 'claude-opus-5-5', systemPrompt: 'x', input: '', schema: ccSchema, binary: FAKE, env: { FAKE_CLAUDE_MODE: mode, PATH: process.env.PATH, ...envExtra }, ...extra });
+const ccArgv = async (extra = {}) => (await ccRun('argv', { schema: { type: 'object' }, ...extra })).value;
+
+test('claude-code: success returns validated value, usage and cost', async () => {
+  const r = await ccRun('ok', { input: '{"a":1}' }, { FAKE_CLAUDE_OUTPUT: '{"ok":true}' });
+  assert.deepEqual(r.value, { ok: true }); assert.equal(r.usage.inputTokens, 120); assert.equal(r.usage.outputTokens, 30); assert.equal(r.costUsd, 0.004);
+});
+test('claude-code: argv carries flags and child env excludes API keys', async () => {
+  const v = await ccArgv({ model: 'claude-sonnet-5-5', systemPrompt: 'sys', input: 'in', tools: ['WebSearch', 'WebFetch(domain:nseindia.com)'], maxTurns: 3,
+    env: { FAKE_CLAUDE_MODE: 'argv', PATH: process.env.PATH, ANTHROPIC_API_KEY: 'leak', CLAUDE_CODE_OAUTH_TOKEN: 'tok', HOME: '/tmp' } });
+  const a = v.argv.join(' ');
+  for (const flag of ['-p', '--output-format json', '--json-schema', '--model claude-sonnet-5-5', '--max-turns 3', '--max-budget-usd 0.5', '--allowedTools WebSearch WebFetch(domain:nseindia.com)', '--system-prompt sys', '--no-session-persistence']) assert.ok(a.includes(flag), flag);
+  // Only the named built-ins exist in the child; the domain rules then narrow WebFetch.
+  assert.equal(v.argv[v.argv.indexOf('--tools') + 1], 'WebSearch,WebFetch');
+  assert.ok(!v.env.includes('ANTHROPIC_API_KEY')); assert.ok(v.env.includes('CLAUDE_CODE_OAUTH_TOKEN')); assert.equal(v.stdin, 'in');
+});
+test('claude-code: no tools passes --tools ""', async () => {
+  const { argv } = await ccArgv();
+  assert.equal(argv[argv.indexOf('--tools') + 1], ''); assert.ok(!argv.includes('--allowedTools')); assert.ok(argv.includes('--no-session-persistence'));
+});
+test('claude-code: each call runs in a fresh empty temp dir that is removed afterwards', async () => {
+  const first = await ccArgv(), second = await ccArgv();
+  for (const run of [first, second]) {
+    assert.ok(run.cwd.startsWith(realpathSync(tmpdir())), run.cwd); assert.notEqual(run.cwd, realpathSync(process.cwd()));
+    assert.deepEqual(run.files, []); assert.equal(existsSync(run.cwd), false);
+  }
+  assert.notEqual(first.cwd, second.cwd);
+});
+test('claude-code: limit message becomes MODEL_LIMIT with resetAt', async () => {
+  await assert.rejects(ccRun('limit'), (e) => e.code === 'MODEL_LIMIT' && typeof e.resetAt === 'string' && new Date(e.resetAt) > new Date());
+});
+test('claude-code: schema violation is MODEL_SCHEMA', async () => {
+  await assert.rejects(ccRun('badjson'), (e) => e.code === 'MODEL_SCHEMA');
+});
+test('claude-code: timeout kills the child', async () => {
+  const started = Date.now();
+  await assert.rejects(ccRun('hang', { timeoutMs: 200 }), (e) => e.code === 'MODEL_TIMEOUT');
+  assert.ok(Date.now() - started < 1000);
+});
+test('claude-code: other non-zero exit is MODEL_EXIT', async () => {
+  await assert.rejects(ccRun('nope'), (e) => e.code === 'MODEL_EXIT');
+});
+test('claude-code: validator enforces enum, bounds, required and additionalProperties', async () => {
+  const strict = { type: 'object', properties: { s: { type: 'string', enum: ['a', 'b'] }, n: { type: 'integer', minimum: 1, maximum: 3 }, t: { type: 'array', items: { type: 'string', maxLength: 2 }, maxItems: 1 } }, required: ['s'], additionalProperties: false };
+  const run = (out) => ccRun('ok', { schema: strict }, { FAKE_CLAUDE_OUTPUT: JSON.stringify(out) });
+  assert.deepEqual((await run({ s: 'a', n: 2, t: ['xy'] })).value, { s: 'a', n: 2, t: ['xy'] });
+  for (const bad of [{}, { s: 'c' }, { s: 'a', n: 4 }, { s: 'a', n: 1.5 }, { s: 'a', t: ['xyz'] }, { s: 'a', t: ['a', 'b'] }, { s: 'a', extra: 1 }]) {
+    await assert.rejects(run(bad), (e) => e.code === 'MODEL_SCHEMA', JSON.stringify(bad));
+  }
+});
+test('validateModelConfig accepts claude-code and requires a model id', () => {
+  assert.equal(validateModelConfig({ provider: 'claude-code', model: 'claude-opus-5-5' }).provider, 'claude-code');
+  assert.throws(() => validateModelConfig({ provider: 'claude-code' }));
+});
+test('providerStatus reports the Claude Code OAuth token', () => {
+  const previous = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  try {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'tok'; assert.equal(providerStatus().claudeCode, true);
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN; assert.equal(providerStatus().claudeCode, false);
+  } finally { if (previous !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = previous; }
+});
+
+test('schemaErrors accepts array-valued type including null', () => {
+  const schema = { type: 'object', properties: { stop: { type: ['number', 'null'] } } };
+  assert.deepEqual(schemaErrors({ stop: null }, schema), []);
+  assert.deepEqual(schemaErrors({ stop: 101.5 }, schema), []);
+  assert.deepEqual(schemaErrors({ stop: 'x' }, schema), ['$.stop must be number or null']);
+  assert.deepEqual(schemaErrors(null, { type: 'number' }), ['$ must be number']);
 });

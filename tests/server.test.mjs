@@ -1,11 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createApplication } from '../src/server.mjs';
+import { Store } from '../src/store.mjs';
+import { TradingEngine } from '../src/engine.mjs';
 import { ACCESS_TOKEN, fakeClient, fakeTicker } from './kite-fakes.mjs';
 
-async function workspace(t) {
-  const app = createApplication({ dbPath: ':memory:', port: 0, autoStepMs: 0 });
+async function workspace(t, app = createApplication({ dbPath: ':memory:', port: 0, autoStepMs: 0 })) {
   const address = await app.listen();
   t.after(() => app.close());
   const base = `http://127.0.0.1:${address.port}`;
@@ -15,6 +19,15 @@ async function workspace(t) {
   };
   return { app, base, request };
 }
+
+// A file-backed workspace whose stored settings enable the expert book at startup.
+function seededDb(t, settings = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'server-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, 'trading-lab.sqlite');
+  const seed = new Store(dbPath); new TradingEngine(seed).settings({ expert: { enabled: true }, ...settings }); seed.close();
+  return { dir, dbPath };
+}
+const expertWorkspace = (t, options = {}) => workspace(t, createApplication({ dbPath: seededDb(t).dbPath, port: 0, autoStepMs: 0, ...options }));
 
 test('dashboard, API, paper ledger and export form a complete local flow', async t => {
   const { base, request } = await workspace(t);
@@ -123,10 +136,129 @@ test('health reports mode and kite state', async t => {
   assert.equal(health.mode, 'paper'); assert.equal(health.kite, 'none'); assert.equal(health.liveTrading, false); assert.equal(health.lastTickAt, null);
 });
 
-test('reports route returns saved daily reports', async t => {
-  const { app, base } = await workspace(t);
+test('reports route pairs rules and expert reports by day; scorecard route answers the exit bar', async t => {
+  const { app, base } = await expertWorkspace(t);
   assert.deepEqual(await (await fetch(base + '/api/reports')).json(), []);
   app.engine.dailyReport('2026-10-14', { ticks: 0, flagged: false });
+  app.engine.dailyReport('2026-10-15', { ticks: 0, flagged: false });
+  app.expertEngine.dailyReport('2026-10-14', { ticks: 0, flagged: false }, { expert: { scores: [] } });
   const reports = await (await fetch(base + '/api/reports')).json();
-  assert.equal(reports.length, 1); assert.equal(reports[0].day, '2026-10-14');
+  assert.deepEqual(reports.map(r => r.day), ['2026-10-14', '2026-10-15']);
+  assert.equal(reports[0].rules.day, '2026-10-14'); assert.deepEqual(reports[0].expert.expert.scores, []); assert.equal(reports[1].expert, null);
+  const card = await (await fetch(base + '/api/scorecard')).json();
+  assert.equal(card.sessions, 1); assert.equal(card.exitBarMet, false);
+});
+
+test('with the expert book disabled nothing expert is built: no store file, no book, rules-only reports and scorecard', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'server-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { app, base, request } = await workspace(t, createApplication({ dbPath: join(dir, 'trading-lab.sqlite'), port: 0, autoStepMs: 0 }));
+  const state = await (await fetch(base + '/api/state')).json();
+  assert.deepEqual(state.expert, { enabled: false, book: null, theses: {}, runner: null });
+  assert.equal(app.expertEngine, null); assert.equal(app.expertStore, null);
+  assert.equal((await request('/api/settings', { risk: { maxPositionPct: 20 } })).status, 200);
+  app.engine.dailyReport('2026-10-14', { ticks: 0, flagged: false });
+  const reports = await (await fetch(base + '/api/reports')).json();
+  assert.deepEqual(reports.map(r => [r.day, r.expert]), [['2026-10-14', null]]);
+  const card = await fetch(base + '/api/scorecard');
+  assert.equal(card.status, 200); assert.equal((await card.json()).sessions, 0);
+  assert.ok(!readdirSync(dir).some(name => name.includes('-expert')), readdirSync(dir).join(', '));
+  const kite = await kiteWorkspace(t);
+  assert.equal(kite.app.runner.expert, null);
+});
+
+test('an expert read that throws never fails or alters a rules response', async t => {
+  const { app, base } = await expertWorkspace(t);
+  const before = await (await fetch(base + '/api/state')).json();
+  app.expertStore.thesesFor = () => { throw new Error('expert db locked'); };
+  app.expertStore.dailyReports = () => { throw new Error('expert db locked'); };
+  const state = await fetch(base + '/api/state');
+  assert.equal(state.status, 200);
+  const body = await state.json();
+  assert.equal(body.expert.enabled, true); assert.match(body.expert.error, /expert db locked/); assert.equal(body.run.cursor, before.run.cursor);
+  // A rules mutation (stop tighten) still answers 200.
+  const s = app.engine.state, row = s.dataset[s.cursor], symbol = s.assets[0].symbol, close = row.bars[symbol].close;
+  s.positions = [{ id: 'held-position', symbol, quantity: 1, entryPrice: close, markPrice: close, entryFee: 0, stopPrice: close * 0.5, takeProfitPrice: close * 2, trailingStopPct: 0,
+    peakPrice: close, strategyId: 'momentum', configVersion: s.settings.version, openedAt: row.timestamp }];
+  const tightened = await fetch(base + '/api/positions/held-position/stop', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ stopPrice: close * 0.6 }) });
+  assert.equal(tightened.status, 200);
+  const result = await tightened.json();
+  assert.equal(result.positions[0].stopPrice, close * 0.6); assert.match(result.expert.error, /expert db locked/);
+  app.engine.dailyReport('2026-10-14', { ticks: 0, flagged: false });
+  const logged = [], write = process.stderr.write;
+  process.stderr.write = chunk => { logged.push(String(chunk)); return true; };
+  let reports;
+  try { reports = await fetch(base + '/api/reports'); } finally { process.stderr.write = write; }
+  assert.equal(reports.status, 200); assert.deepEqual((await reports.json()).map(r => [r.day, r.expert]), [['2026-10-14', null]]);
+  assert.match(logged.join(''), /Expert reports unavailable: expert db locked/);
+});
+
+test('expert enabled at startup wires the runner, guards research calls and mirrors expert settings', async t => {
+  const { dbPath } = seededDb(t);
+  let fail = false;
+  const modelRunner = async () => { if (fail) throw new Error('claude -p failed'); return { value: { records: [], coverageNote: 'none' }, usage: { inputTokens: 1, outputTokens: 2 }, costUsd: 0 }; };
+  const app = createApplication({ dbPath, port: 0, autoStepMs: 0, kite: { apiKey: 'key', apiSecret: 'kite-api-secret' }, modelRunner,
+    makeClient: () => fakeClient(), makeTicker: () => fakeTicker(), liveOptions: { intervalMs: 0, calendar: () => null } });
+  const address = await app.listen(); t.after(() => app.close());
+  const base = `http://127.0.0.1:${address.port}`;
+  assert.ok(app.runner.expert); assert.equal(app.expertEngine.state.settings.expert.enabled, true);
+  assert.equal((await app.runner.expert.research({ symbol: 'MARKET', now: () => Date.parse('2026-10-14T03:00:00.000Z') })).coverageNote, 'none');
+  fail = true;
+  await assert.rejects(app.runner.expert.research({ symbol: 'INFY', now: () => Date.parse('2026-10-14T03:00:00.000Z') }), /claude -p failed/);
+  const calls = app.expertStore.audit().filter(row => row.kind === 'model-call-finished').map(row => row.payload.status);
+  assert.deepEqual(calls, ['completed', 'failed']); assert.equal(app.store.callCount(), 0);
+  const response = await fetch(base + '/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expert: { maxResearchPerSession: 3 } }) });
+  const body = await response.json();
+  assert.equal(response.status, 200); assert.equal(body.expertWarning, undefined); assert.equal(body.expert.enabled, true);
+  assert.equal(app.engine.state.settings.expert.maxResearchPerSession, 3); assert.equal(app.expertEngine.state.settings.expert.maxResearchPerSession, 3);
+  // A mirror failure is a warning; the rules book's update still stands.
+  app.expertEngine.settings = () => { throw new Error('Engine is busy'); };
+  const warned = await fetch(base + '/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expert: { maxResearchPerSession: 4 } }) });
+  assert.equal(warned.status, 200); assert.match((await warned.json()).expertWarning, /busy/);
+  assert.equal(app.engine.state.settings.expert.maxResearchPerSession, 4);
+});
+
+test('fix #2: every setting is mirrored to the expert book', async t => {
+  const { app, request } = await expertWorkspace(t);
+  const response = await request('/api/settings', { risk: { maxPositionPct: 20 } });
+  assert.equal(response.status, 200); assert.equal(response.body.expertWarning, undefined);
+  assert.equal(app.engine.state.settings.risk.maxPositionPct, 20); assert.equal(app.expertEngine.state.settings.risk.maxPositionPct, 20);
+});
+
+async function drifted(t, prepareExpert) {
+  const { dir, dbPath } = seededDb(t, { risk: { maxPositionPct: 20 }, simulation: { startingCapital: 12000 } });
+  const expert = new Store(join(dir, 'trading-lab-expert.sqlite')); await prepareExpert(new TradingEngine(expert)); expert.close();
+  const warnings = [], write = process.stderr.write;
+  process.stderr.write = chunk => { warnings.push(String(chunk)); return true; };
+  let app;
+  try { app = createApplication({ dbPath, port: 0, autoStepMs: 0 }); } finally { process.stderr.write = write; }
+  await app.listen(); t.after(() => app.close());
+  return { app, warnings };
+}
+
+test('fix #2: startup re-syncs drifted expert settings to the rules book', async t => {
+  const { app, warnings } = await drifted(t, engine => engine.settings({ risk: { maxPositionPct: 10 } }));
+  const { version: _a, ...rules } = app.engine.state.settings, { version: _b, ...expert } = app.expertEngine.state.settings;
+  assert.deepEqual(expert, rules); assert.equal(expert.risk.maxPositionPct, 20); assert.deepEqual(warnings, []);
+});
+
+test('fix #2: a startup re-sync the expert book refuses is a warning and the server still starts', async t => {
+  // The expert book has stepped, so its starting capital can no longer change.
+  const { app, warnings } = await drifted(t, engine => engine.step());
+  assert.equal(app.server.listening, true);
+  assert.equal(app.expertEngine.state.settings.simulation.startingCapital, 9000);
+  assert.match(warnings.join(''), /Warning: expert settings not synced.*starting capital/);
+});
+
+test('POST /api/settings accepts expert settings; the page ships the Expert panel and settings fields', async t => {
+  const { base, request } = await workspace(t);
+  const saved = await request('/api/settings', { expert: { enabled: true, maxResearchPerSession: 2, allowedDomains: ['nseindia.com'] } });
+  assert.equal(saved.status, 200); assert.equal(saved.body.expertWarning, undefined);
+  const state = await (await fetch(base + '/api/state')).json();
+  assert.equal(state.settings.expert.enabled, true); assert.equal(state.settings.expert.maxResearchPerSession, 2);
+  assert.deepEqual(state.settings.expert.allowedDomains, ['nseindia.com']);
+  // The running flag follows the startup value, so the panel must say a restart is needed.
+  assert.equal(state.expert.enabled, false);
+  const html = await (await fetch(base + '/')).text(), script = await (await fetch(base + '/app.js')).text();
+  for (const id of ['expert-panel', 'expert-enabled', 'expert-thesis-model', 'expert-decision-model', 'expert-research-model', 'expert-max-research', 'expert-domains']) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /next service restart/); assert.match(script, /function renderExpert/);
 });

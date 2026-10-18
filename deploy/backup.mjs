@@ -16,12 +16,19 @@ export async function backup({ dbPath, backupDir, ticksDir = join(dirname(dbPath
   const tickFile = join(ticksDir, `ticks-${day}.jsonl`);
   const ticks = existsSync(tickFile) ? join(backupDir, `ticks-${day}.jsonl`) : null;
   if (ticks) copyFileSync(tickFile, ticks);
+  // The expert book (Phase 1b) keeps its own database beside the rules book's.
+  const expertPath = dbPath.replace(/(\.sqlite)?$/, '-expert$1');
+  const expertDatabase = existsSync(expertPath) ? join(backupDir, `trading-lab-expert-${day}.sqlite`) : null;
+  if (expertDatabase) {
+    const expert = new DatabaseSync(expertPath, { readOnly: true });
+    try { await sqliteBackup(expert, expertDatabase); } finally { expert.close(); }
+  }
   const pruned = [];
   for (const name of readdirSync(backupDir)) {
     const path = join(backupDir, name);
-    if (path !== database && path !== ticks && now - statSync(path).mtimeMs > KEEP_MS) { unlinkSync(path); pruned.push(path); }
+    if (![database, ticks, expertDatabase].includes(path) && now - statSync(path).mtimeMs > KEEP_MS) { unlinkSync(path); pruned.push(path); }
   }
-  return { day, database, ticks, pruned };
+  return { day, database, ticks, pruned, ...(expertDatabase && { expertDatabase }) };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

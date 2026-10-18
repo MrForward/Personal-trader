@@ -38,3 +38,22 @@ test('fixed monthly costs and spend cap are validated', () => {
   assert.equal(validateSettings({ simulation: { fixedCostsPerMonthInr: 0 } }).simulation.fixedCostsPerMonthInr, 0);
   for (const bad of [-1, 100001, NaN]) assert.throws(() => validateSettings({ simulation: { spendCapPerMonthInr: bad } }), /spendCapPerMonthInr/);
 });
+test('expert settings default off and validate', () => {
+  assert.equal(validateSettings({}).expert.enabled, false);
+  assert.equal(DEFAULT_SETTINGS.expert.allowedDomains.length, 8);
+  assert.equal(DEFAULT_SETTINGS.model.dailyCallLimit, 60);
+  assert.throws(() => validateSettings({ expert: { enabled: 'yes' } }));
+  assert.throws(() => validateSettings({ expert: { allowedDomains: ['http://x'] } }));
+  assert.throws(() => validateSettings({ expert: { surprise: 1 } }), /Unknown expert setting/);
+  assert.throws(() => validateSettings({ expert: { maxResearchPerSession: 21 } }));
+  assert.throws(() => validateSettings({ expert: { maxResearchPerSession: 1.5 } }));
+  assert.throws(() => validateSettings({ expert: { thesisModel: '--flag injection' } }));
+  assert.equal(validateSettings({ expert: { maxResearchPerSession: 3 } }).expert.maxResearchPerSession, 3);
+});
+test('partial expert updates merge over previous values and settings without expert still validate', () => {
+  const first = validateSettings({ expert: { enabled: true, allowedDomains: ['nseindia.com'] } });
+  const second = validateSettings({ expert: { maxResearchPerSession: 2 } }, first);
+  assert.deepEqual(second.expert, { ...DEFAULT_SETTINGS.expert, enabled: true, allowedDomains: ['nseindia.com'], maxResearchPerSession: 2 });
+  const { expert, ...legacy } = DEFAULT_SETTINGS;
+  assert.deepEqual(validateSettings({}, legacy).expert, DEFAULT_SETTINGS.expert);
+});

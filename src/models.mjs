@@ -1,4 +1,13 @@
-const PROVIDERS = new Set(['rules', 'openai', 'anthropic']);
+import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { redact, registerSecret } from './secrets.mjs';
+
+if (process.env.CLAUDE_CODE_OAUTH_TOKEN) registerSecret(process.env.CLAUDE_CODE_OAUTH_TOKEN);
+
+const PROVIDERS = new Set(['rules', 'openai', 'anthropic', 'claude-code']);
+export const MODEL_ERROR_CODES = ['MODEL_LIMIT', 'MODEL_SCHEMA', 'MODEL_TIMEOUT', 'MODEL_EXIT'];
 const STRATEGIES = new Set(['momentum', 'mean_reversion']);
 const REVIEW_FIELDS = ['strategyId', 'summary', 'evidence', 'counterEvidence', 'invalidation'];
 
@@ -7,6 +16,7 @@ export function providerStatus() {
     rules: true,
     openai: Boolean(process.env.OPENAI_API_KEY),
     anthropic: Boolean(process.env.ANTHROPIC_API_KEY),
+    claudeCode: Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN),
   };
 }
 
@@ -234,4 +244,87 @@ export async function reviewMarket({ model, context, fetchImpl = globalThis.fetc
     result = anthropicResult(body);
   }
   return { ...validateReview(result.value, enabled), provider: config.provider, model: config.model, usage: result.usage };
+}
+
+const modelError = (code, message, extra = {}) => Object.assign(new Error(redact(message)), { code, ...extra });
+
+// shortcut: covers only the JSON Schema keywords this project uses; upgrade if schemas grow (oneOf, pattern, $ref).
+const isType = (value, type) => type === 'null' ? value === null : type === 'object' ? isObject(value) : type === 'array' ? Array.isArray(value)
+  : type === 'integer' ? Number.isInteger(value) : type === 'number' ? typeof value === 'number' && Number.isFinite(value) : typeof value === type;
+
+export function schemaErrors(value, schema, path = '$') {
+  const types = [schema.type ?? []].flat();
+  if (types.length && !types.some((type) => isType(value, type))) return [`${path} must be ${types.join(' or ')}`];
+  if (schema.enum && !schema.enum.includes(value)) return [`${path} not in enum`];
+  if (typeof value === 'string' && value.length > (schema.maxLength ?? Infinity)) return [`${path} too long`];
+  if (typeof value === 'number' && (value < (schema.minimum ?? -Infinity) || value > (schema.maximum ?? Infinity))) return [`${path} out of range`];
+  if (Array.isArray(value)) {
+    if (value.length > (schema.maxItems ?? Infinity)) return [`${path} has too many items`];
+    return schema.items ? value.flatMap((item, i) => schemaErrors(item, schema.items, `${path}[${i}]`)) : [];
+  }
+  if (!isObject(value)) return [];
+  const props = schema.properties ?? {};
+  return [
+    ...(schema.required ?? []).filter((k) => !Object.hasOwn(value, k)).map((k) => `${path}.${k} is required`),
+    ...(schema.additionalProperties === false ? Object.keys(value).filter((k) => !Object.hasOwn(props, k)).map((k) => `${path}.${k} is not allowed`) : []),
+    ...Object.keys(props).filter((k) => Object.hasOwn(value, k)).flatMap((k) => schemaErrors(value[k], props[k], `${path}.${k}`)),
+  ];
+}
+
+const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const IST_OFFSET_MS = 5.5 * 3600000;
+
+// Parses "resets 3:45pm" / "resets Mon 12:00am" as the next such time in Asia/Kolkata (no DST); null if unparseable.
+function parseResetAt(text, now = Date.now()) {
+  const m = /resets\s+(?:(sun|mon|tue|wed|thu|fri|sat)\w*\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)/i.exec(text);
+  if (!m) return null;
+  const hour = Number(m[2]) % 12 + (m[4].toLowerCase() === 'pm' ? 12 : 0);
+  const ist = new Date(now + IST_OFFSET_MS); // UTC fields of this date are IST wall-clock fields
+  let at = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate(), hour, Number(m[3] ?? 0)) - IST_OFFSET_MS;
+  if (m[1]) {
+    const want = WEEKDAYS.indexOf(m[1].toLowerCase());
+    at += ((want - ist.getUTCDay() + 7) % 7) * 86400000;
+    if (at <= now) at += 7 * 86400000;
+  } else if (at <= now) at += 86400000;
+  return new Date(at).toISOString();
+}
+
+// Field names `structured_output`, `usage.input_tokens`, `usage.output_tokens`, `total_cost_usd` per
+// code.claude.com headless docs; written against CLI 2.1.52; live verification pending.
+export async function runClaudeCode({ model, systemPrompt, input, schema, tools = [], maxTurns = 1, maxBudgetUsd = 0.5, timeoutMs = 60000, binary = 'claude', env = process.env, spawnImpl = spawn }) {
+  const args = ['-p', '--output-format', 'json', '--model', model, '--system-prompt', systemPrompt, '--json-schema', JSON.stringify(schema),
+    '--max-turns', String(maxTurns), '--max-budget-usd', String(maxBudgetUsd), '--no-session-persistence',
+    // --tools limits the child to the named built-ins (no Read, Glob, Grep or Bash); --allowedTools then applies the domain rules.
+    '--tools', [...new Set(tools.map((tool) => tool.replace(/\(.*$/, '')))].join(','), ...(tools.length ? ['--allowedTools', ...tools] : [])];
+  // FAKE_CLAUDE_* lets tests steer tests/fixtures/fake-claude.mjs; real runs never set them.
+  const picked = Object.fromEntries(Object.entries(env).filter(([k]) => ['PATH', 'HOME', 'LANG', 'CLAUDE_CODE_OAUTH_TOKEN'].includes(k) || k.startsWith('FAKE_CLAUDE_')));
+  // A fresh empty working directory per call, so the child can see no project or home files.
+  const cwd = mkdtempSync(join(tmpdir(), 'claude-run-'));
+  const { stdout, stderr, code } = await new Promise((resolve, reject) => {
+    const child = spawnImpl(binary, args, { env: picked, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '', err = '', done = false;
+    const finish = (fn, v) => { if (!done) { done = true; clearTimeout(timer); fn(v); } };
+    const timer = setTimeout(() => { child.kill('SIGKILL'); finish(reject, modelError('MODEL_TIMEOUT', 'claude -p timed out.')); }, timeoutMs);
+    child.stdout.on('data', (d) => { if (out.length < 2e6) out += d; });
+    child.stderr.on('data', (d) => { if (err.length < 2e4) err += d; });
+    child.on('error', (e) => finish(reject, modelError('MODEL_EXIT', `claude -p could not start: ${e.message}`)));
+    child.on('close', (c) => finish(resolve, { stdout: out, stderr: err, code: c }));
+    child.stdin.on('error', () => {});
+    child.stdin.end(input);
+  }).finally(() => rmSync(cwd, { recursive: true, force: true }));
+  if (/hit your (session|weekly) limit/i.test(stdout)) throw modelError('MODEL_LIMIT', 'Claude Code usage limit reached.', { resetAt: parseResetAt(stdout) });
+  if (code !== 0) throw modelError('MODEL_EXIT', `claude -p exited with code ${code}: ${(stderr || stdout).trim().slice(0, 500)}`);
+  let result;
+  try { result = JSON.parse(stdout.trim().split('\n').filter(Boolean).at(-1)); } catch { result = null; }
+  if (!isObject(result)) throw modelError('MODEL_SCHEMA', 'claude -p returned no JSON result.');
+  if (result.is_error === true) throw modelError('MODEL_EXIT', 'claude -p reported an error result.');
+  if (!isObject(result.structured_output)) throw modelError('MODEL_SCHEMA', 'claude -p result has no structured_output.');
+  const errors = schemaErrors(result.structured_output, schema);
+  if (errors.length) throw modelError('MODEL_SCHEMA', `structured_output violates the schema: ${errors.slice(0, 3).join('; ')}`);
+  return {
+    value: result.structured_output,
+    usage: { inputTokens: tokenCount(result.usage?.input_tokens, true), outputTokens: tokenCount(result.usage?.output_tokens, true) },
+    costUsd: Number.isFinite(result.total_cost_usd) ? result.total_cost_usd : 0,
+    raw: result,
+  };
 }

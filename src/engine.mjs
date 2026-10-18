@@ -70,8 +70,25 @@ function safeMessage(error) {
   return redact(error instanceof Error ? error.message : 'Model review failed.').slice(0, 1000);
 }
 
+// Tighten-only: a stop may only rise, and stay below the mark. Returns why a stop is refused, else null.
+function stopRefusal(position, stop) {
+  if (typeof stop !== 'number' || !Number.isFinite(stop) || stop <= 0) return 'invalid';
+  if (stop < position.stopPrice) return 'widening';
+  if (stop === position.stopPrice) return 'unchanged';
+  return stop >= position.markPrice ? 'above-mark' : null;
+}
+// `state` is unused today; kept so callers share one signature with the rest of the engine's state helpers.
+export function applyTighten(state, position, stop, source, timestamp = new Date().toISOString()) {
+  const refusal = stopRefusal(position, stop);
+  // An equal stop is a no-op success for the user dialog (pre-filled with the current stop); only the expert path refuses it.
+  if (refusal && !(refusal === 'unchanged' && source === 'user')) return false;
+  const previous = position.stopPrice; position.stopPrice = stop; (position.stopRevisions ??= []).push({ timestamp, previous, next: stop, source });
+  return true;
+}
+
 export class TradingEngine {
-  constructor(store, { reviewer = reviewMarket, allowPaidCalls = false, intelligenceProvider = null } = {}) {
+  constructor(store, { reviewer = reviewMarket, allowPaidCalls = false, intelligenceProvider = null, decider = null } = {}) {
+    this.decider = decider;
     this.store = store; this.reviewer = reviewer; this.allowPaidCalls = allowPaidCalls === true; this.intelligenceProvider = intelligenceProvider; this.busy = false;
     this.state = store.load() ?? newState(DEFAULT_SETTINGS, makeDemoSeries(), DEMO_ASSETS, 'synthetic demo');
     // Compatible with paused draft state: new fields are explicit paper defaults.
@@ -79,6 +96,7 @@ export class TradingEngine {
     this.state.settings.universe ??= DEFAULT_SETTINGS.universe; this.state.settings.barMinutes ??= DEFAULT_SETTINGS.barMinutes;
     this.state.settings.simulation.costSchedule ??= DEFAULT_SETTINGS.simulation.costSchedule; delete this.state.settings.simulation.feeBps;
     this.state.settings.simulation.fixedCostsPerMonthInr ??= DEFAULT_SETTINGS.simulation.fixedCostsPerMonthInr; this.state.settings.simulation.spendCapPerMonthInr ??= DEFAULT_SETTINGS.simulation.spendCapPerMonthInr;
+    this.state.settings.expert ??= clone(DEFAULT_SETTINGS.expert);
     this.state.cappedBenchmark ??= benchmark(this.state.settings.simulation.startingCapital, true);
     this.state.riskLatched ??= this.state.status === 'risk-paused';
     this.state.sessionDay ??= sessionDay(this.state.dataset[this.state.cursor].timestamp);
@@ -230,9 +248,8 @@ export class TradingEngine {
     if (!p) throw new Error('Position not found.');
     const stop = input.stopPrice;
     if (typeof stop !== 'number' || !Number.isFinite(stop) || stop <= 0 || stop >= p.markPrice) throw new Error('Stop must be positive and below the current mark price.');
-    if (stop < p.stopPrice) throw new Error('Existing stops may only be tightened.');
-    const previous = p.stopPrice; p.stopPrice = stop; p.stopRevisions ??= [];
-    p.stopRevisions.push({ timestamp: new Date().toISOString(), previous, next: stop, source: 'user' });
+    const previous = p.stopPrice;
+    if (!applyTighten(next, p, stop, 'user')) throw new Error('Existing stops may only be tightened.');
     return this.commit(next, 'stop-change', { positionId: id, previous, next: stop });
   }); }
   async callReviewer(symbol, state, capturedContext = this.context(symbol, state)) {
@@ -302,6 +319,30 @@ export class TradingEngine {
       book.pending = false; book.entryTimestamp = row.timestamp; book.configVersion = state.settings.version;
     }
   }
+  // Expert path: the decider picks the action; sizing, risk and fills stay with the engine. Rejection suppresses, never trades.
+  async decide(asset, position, s, captured, options, previous, next) {
+    const base = { id: randomUUID(), timestamp: previous.timestamp, executionTimestamp: next.timestamp, symbol: asset.symbol, strategyId: 'expert', evidence: [], counterEvidence: [],
+      configVersion: s.settings.version, positionConfigVersion: position?.configVersion ?? null, outcome: 'No order', modelSummary: null, inputSnapshot: captured };
+    const hold = (reason, outcome) => ({ asset, candidate: { action: 'HOLD', strategyId: 'expert', reason, evidence: [], counterEvidence: [] },
+      decision: { ...base, action: 'HOLD', reason, provider: 'rules', model: 'deterministic rules', outcome, trigger: null, expert: null } });
+    if (!position && (options.blockEntries || s.riskLatched)) {
+      return hold('Entries are blocked this step; the expert was not consulted.', `Suppressed: entries blocked${options.blockEntries ? `: ${options.blockEntries}` : ''}`);
+    }
+    let result;
+    try { result = await this.decider({ symbol: asset.symbol, state: s, context: captured }); }
+    catch (error) {
+      // A replay miss must stop the replay, not become a suppression the live run never had.
+      if (storageFailure(error) || error?.code === 'REPLAY_MISS') throw error;
+      const message = safeMessage(error);
+      return hold(`Expert unavailable: ${message}. No new trade.`, `Suppressed: ${message}`);
+    }
+    const action = result.action === 'enter' && !position ? 'BUY' : result.action === 'exit' && position ? 'SELL' : 'HOLD';
+    const evidence = result.evidence ?? [], counterEvidence = result.counterEvidence ?? [];
+    const candidate = { action, strategyId: 'expert', reason: result.reason, evidence, counterEvidence };
+    const record = result.record ?? null;
+    return { asset, candidate, tightenStopTo: result.tightenStopTo ?? null, decision: { ...base, action, reason: result.reason, evidence, counterEvidence,
+      provider: record ? 'claude-code' : 'rules', model: record ? s.settings.expert?.decisionModel : 'deterministic rules', trigger: result.trigger ?? null, expert: record } };
+  }
   async step(options = {}) { return this.exclusiveAsync(async () => {
     if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => !['runId', 'expectedCursor', 'blockEntries'].includes(key))
       || options.blockEntries !== undefined && (typeof options.blockEntries !== 'string' || !options.blockEntries)
@@ -317,6 +358,7 @@ export class TradingEngine {
       for (const asset of s.assets) {
         const position = s.positions.find(p => p.symbol === asset.symbol);
         const captured = this.context(asset.symbol, s);
+        if (this.decider) { proposals.push(await this.decide(asset, position, s, captured, options, previous, next)); continue; }
         let selected = position?.strategyId ?? (s.settings.strategy.mode === 'auto' ? captured.rulesChoice : s.settings.strategy.mode);
         let review, modelError;
         if (!position && !s.riskLatched && s.settings.strategy.mode === 'auto' && s.settings.model.provider !== 'rules') {
@@ -341,6 +383,12 @@ export class TradingEngine {
         if (bar.open <= p.stopPrice) { this.sell(s, p, bar.open, next, 'Gap protective stop', 'open'); proposal.decision.outcome = 'Gap stop filled'; }
         else if (bar.open >= p.takeProfitPrice) { this.sell(s, p, bar.open, next, 'Gap profit target', 'open'); proposal.decision.outcome = 'Gap target filled'; }
         else if (proposal.candidate.action === 'SELL') { this.sell(s, p, bar.open, next, proposal.candidate.reason, 'open'); proposal.decision.outcome = 'Paper strategy sell filled'; }
+      }
+      // Expert stop tightening: after open exits, so a gap-closed position is never touched, and before any entry or intrabar check.
+      for (const { asset, tightenStopTo, decision } of proposals) {
+        const p = s.positions.find(position => position.symbol === asset.symbol);
+        if (!p || tightenStopTo == null) continue;
+        if (!applyTighten(s, p, tightenStopTo, 'expert', next.timestamp)) decision.stopRejected = stopRefusal(p, tightenStopTo);
       }
       // Phase 2: every next-open entry precedes every intrabar exit. Later cash is unavailable here.
       for (const { asset, candidate, decision } of proposals) {
@@ -393,7 +441,7 @@ export class TradingEngine {
     }
   }); }
   // shortcut: fixed costs prorated over 21 trading days a month; use actual invoices if a month's count matters.
-  dailyReport(day, dataQuality = {}) {
+  dailyReport(day, dataQuality = {}, extra = {}) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error('Report day must be YYYY-MM-DD.');
     const s = this.state, sim = s.settings.simulation, perDay = sim.fixedCostsPerMonthInr / 21;
     const liveDays = [...new Set(s.dataset.filter(row => row.source === 'ticks' || row.source === 'thin').map(row => sessionDay(row.timestamp)))].filter(d => d <= day);
@@ -405,7 +453,7 @@ export class TradingEngine {
       tradesToday: s.trades.filter(trade => sessionDay(trade.timestamp) === day),
       benchmarkEquity: m.benchmarkEquity, cappedBenchmarkEquity: m.cappedBenchmarkEquity,
       tradingDays: liveDays.length, fixedCostsToDate, monthToDateFixedCosts, spendCap: sim.spendCapPerMonthInr,
-      netAfterFixedCosts: money(m.equity - sim.startingCapital - fixedCostsToDate), dataQuality: clone(dataQuality) };
+      netAfterFixedCosts: money(m.equity - sim.startingCapital - fixedCostsToDate), dataQuality: clone(dataQuality), ...clone(extra) };
     this.store.saveDailyReport(day, payload);
     return payload;
   }

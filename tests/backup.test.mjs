@@ -31,3 +31,13 @@ test('backup without a tick file still copies the database', async t => {
   const result = await backup({ dbPath, backupDir: join(dir, 'b'), ticksDir: join(dir, 'none'), now: Date.parse('2026-10-14T10:30:00Z') });
   assert.equal(result.ticks, null); assert.ok(existsSync(result.database));
 });
+
+test('backup copies the expert database when present', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'backup-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = join(dir, 'trading-lab.sqlite'); new Store(dbPath).close();
+  const expert = new Store(join(dir, 'trading-lab-expert.sqlite')); expert.save({ marker: 'expert-row' }, 'test'); expert.close();
+  const result = await backup({ dbPath, backupDir: join(dir, 'b'), ticksDir: join(dir, 'none'), now: Date.parse('2026-10-14T10:30:00Z') });
+  assert.equal(result.expertDatabase, join(dir, 'b', 'trading-lab-expert-2026-10-14.sqlite'));
+  const copy = new DatabaseSync(result.expertDatabase, { readOnly: true });
+  assert.equal(JSON.parse(copy.prepare('SELECT payload FROM state WHERE id=1').get().payload).marker, 'expert-row'); copy.close();
+});
