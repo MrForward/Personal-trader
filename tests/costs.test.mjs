@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { charges, perShareRate, COST_SCHEDULES } from '../src/costs.mjs';
+import { charges, perShareRate, COST_SCHEDULES, INTRADAY_OF } from '../src/costs.mjs';
 
 const Z = 'zerodha-cnc-2026-10';
 
@@ -30,3 +30,14 @@ test('unknown schedule or side throws', () => {
   assert.throws(() => charges({ schedule: 'x', side: 'BUY', price: 1, quantity: 1, dpApplies: false }), /schedule/);
   assert.throws(() => charges({ schedule: Z, side: 'HOLD', price: 1, quantity: 1, dpApplies: false }), /side/);
 });
+test('review #5: intraday schedule for same-day CNC round trips', () => {
+  const I = 'zerodha-intraday-2026-10';
+  const buy = charges({ schedule: I, side: 'BUY', price: 1000, quantity: 1, dpApplies: true });
+  assert.equal(buy.stt, 0); assert.equal(buy.brokerage, 0.3); assert.equal(buy.stamp, 0.03); assert.equal(buy.dp, 0);
+  const sell = charges({ schedule: I, side: 'SELL', price: 1000, quantity: 1, dpApplies: true });
+  assert.equal(sell.stt, 0.25); assert.equal(sell.dp, 0);
+  assert.equal(charges({ schedule: I, side: 'BUY', price: 100000, quantity: 1, dpApplies: false }).brokerage, 20);
+  assert.equal(INTRADAY_OF['zerodha-cnc-2026-10'], I); assert.equal(INTRADAY_OF.none, 'none');
+  assert.ok(!COST_SCHEDULES.includes(I));
+});
+test('NSE transaction charge is 0.00307%', () => assert.equal(charges({ schedule: Z, side: 'BUY', price: 1e7, quantity: 1, dpApplies: false }).exchange, 307));

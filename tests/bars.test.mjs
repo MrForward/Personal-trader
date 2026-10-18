@@ -15,7 +15,8 @@ test('ticks fold into a bar and the next-bar tick closes it', () => {
   b.push(tick('A', 99, 30, '2026-10-20T03:59:59Z'));
   const row = b.push(tick('A', 101, 31, '2026-10-20T04:00:00Z'));
   assert.equal(row.timestamp, '2026-10-20T04:00:00.000Z'); assert.equal(row.source, 'ticks'); assert.equal(row.closed, true);
-  assert.deepEqual(row.bars.A, { open: 100, high: 102, low: 99, close: 99, volume: 30, timestamp: '2026-10-20T04:00:00.000Z', closed: true });
+  // No per-bar timestamp: the row's timestamp is the bar end, and a wall-clock check on it would drop bars when the VPS clock lags.
+  assert.deepEqual(row.bars.A, { open: 100, high: 102, low: 99, close: 99, volume: 30 });
   assert.equal(row.bars.B.volume, 5);
 });
 

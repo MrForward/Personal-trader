@@ -87,13 +87,15 @@ Zerodha equity delivery (CNC), as of 17 October 2026, to be re-checked against Z
 |---|---|---|
 | Brokerage | ₹0 | — |
 | STT | 0.1% | buy and sell |
-| NSE transaction | 0.00297% | both |
+| NSE transaction | 0.00307% | both |
 | SEBI | ₹10 per crore | both |
 | Stamp duty | 0.015% | buy |
 | GST | 18% of (brokerage + exchange + SEBI) | both |
 | DP charge | ₹15.34 per scrip per sell day | sell |
 
-For a ₹1,000 one-share round trip that is about ₹2.5 in taxes plus ₹15.34 DP, i.e. ~1.8%. That is why `feeBps=10` understates it and why the universe must stay in stocks where one share is a meaningful position. Golden tests cover: single buy, single sell, two sells of the same scrip on one day (one DP charge), partial exit across two days (two DP charges).
+**Same-session round trips** (amended 17 October 2026 after review): Zerodha charges a CNC buy and sell in the same session at intraday rates: brokerage 0.03% or ₹20 per order, whichever is lower; STT 0.025% on the sell only; stamp 0.003% on the buy; exchange, SEBI and GST as above (GST also on brokerage); no DP charge, since the shares never reach demat. The buy is charged delivery rates when it happens (whether it will be sold the same day is unknown then); a same-day sell carries the difference so the round trip totals intraday charges. Sources: [charges](https://zerodha.com/charges/), [Zerodha support](https://support.zerodha.com/category/account-opening/resident-individual/ri-charges/articles/brokerage-charged-for-partial-delivery).
+
+For a ₹1,000 one-share delivery round trip that is about ₹2.5 in taxes plus ₹15.34 DP, i.e. ~1.8%. That is why `feeBps=10` understates it and why the universe must stay in stocks where one share is a meaningful position. Golden tests cover: single buy, single sell, two sells of the same scrip on one day (one DP charge), partial exit across two days (two DP charges).
 
 Fixed costs (₹500 data + ₹600 VPS, prorated per trading day) appear as a separate line in every report. They are never charged to the paper ledger, so trading P&L stays comparable with buy-and-hold; the report subtracts them below the line.
 

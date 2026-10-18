@@ -44,8 +44,8 @@ export class BarBuilder {
     const bars = {};
     for (const [symbol, sym] of this.symbols) {
       if (sym.lastPrice === null) missing = true;
-      else if (sym.ticked) bars[symbol] = { open: sym.open, high: sym.high, low: sym.low, close: sym.close, volume: sym.lastCumulative - sym.cumulativeAtBarStart, timestamp, closed: true };
-      else { thin = true; bars[symbol] = { open: sym.lastPrice, high: sym.lastPrice, low: sym.lastPrice, close: sym.lastPrice, volume: 0, timestamp, closed: true }; }
+      else if (sym.ticked) bars[symbol] = { open: sym.open, high: sym.high, low: sym.low, close: sym.close, volume: sym.lastCumulative - sym.cumulativeAtBarStart };
+      else { thin = true; bars[symbol] = { open: sym.lastPrice, high: sym.lastPrice, low: sym.lastPrice, close: sym.lastPrice, volume: 0 }; }
       sym.ticked = false; sym.cumulativeAtBarStart = sym.lastCumulative;
     }
     if (missing) { this.counters.missingPrice++; return null; }

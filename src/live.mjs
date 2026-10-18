@@ -17,7 +17,7 @@ export class LiveRunner {
   }
   resetDay(day) {
     this.day = day; this.builder = null; this.barsToday = 0; this.cleanBarsSinceGap = 0; this.lastTickAt = null;
-    this.skewRun = 0; this.unskewRun = 0; this.skewed = false; this.gapBarEnd = null; this.reconnects = 0;
+    this.skewRun = 0; this.unskewRun = 0; this.skewed = false; this.gapBarEnd = null; this.reconnects = 0; this.nextAttemptAt = null; this.partial = false;
     this.counters = { ticks: 0, badTicks: 0, rejectedRows: 0, warmupFailed: 0, disconnects: 0 };
   }
   symbols() { return [...this.engine.state.settings.universe].sort(); }
@@ -25,14 +25,15 @@ export class LiveRunner {
   async start() {
     this.stopTimers();
     const session = this.calendar(this.now());
-    if (session && this.now() >= session.closeMs && this.isLive() && !this.engine.store.hasDailyReport(session.day)) {
-      if (session.day !== this.day) this.resetDay(session.day);
-      this.writeReport();
-    }
+    this.backfillReport(session);
     if (!session || this.now() >= session.closeMs) { this.state = 'idle'; return this.status(); }
-    if (this.session.status().state !== 'valid') { this.state = 'login-needed'; return this.status(); }
     if (session.day !== this.day) this.resetDay(session.day);
-    this.sessionWindow = session; this.state = 'warming-up';
+    // A runner that missed part of the session cannot vouch for that day's data quality.
+    if (this.now() > session.openMs) this.partial = true;
+    this.sessionWindow = session; this.gapBarEnd = null; this.nextAttemptAt = null;
+    if (this.intervalMs > 0) { const id = setInterval(() => this.poll(), this.intervalMs); id.unref?.(); this.timers.push(() => clearInterval(id)); }
+    if (this.session.status().state !== 'valid') { this.state = 'login-needed'; return this.status(); }
+    this.state = 'warming-up';
     try { await this.run(() => this.warmup()); }
     catch (error) {
       if (fatal(error)) return this.die(error);
@@ -47,13 +48,12 @@ export class LiveRunner {
     const last = this.engine.state.dataset.at(-1);
     for (const symbol of this.symbols()) if (last.bars[symbol]) this.builder.seed(symbol, last.bars[symbol].close);
     this.state = 'live';
-    if (this.intervalMs > 0) { const id = setInterval(() => this.poll(), this.intervalMs); id.unref?.(); this.timers.push(() => clearInterval(id)); }
     this.connect();
     return this.status();
   }
   isLive() {
     const s = this.engine.state;
-    return s.mode === 'prospective-paper' && JSON.stringify(s.assets.map(a => a.symbol).sort()) === JSON.stringify(this.symbols());
+    return s.mode === 'prospective-paper' && s.liveBarMinutes === this.barMinutes() && JSON.stringify(s.assets.map(a => a.symbol).sort()) === JSON.stringify(this.symbols());
   }
   async warmup() {
     const endMs = this.now(), symbols = this.symbols();
@@ -73,11 +73,11 @@ export class LiveRunner {
   }
   onTick(tick) {
     if (!this.builder || !['live', 'disconnected'].includes(this.state)) return;
-    if (this.state === 'disconnected') { this.state = 'live'; this.reconnects = 0; this.gapBarEnd = null; }
+    if (this.state === 'disconnected') { this.state = 'live'; this.reconnects = 0; this.gapBarEnd = null; this.nextAttemptAt = null; }
     mkdirSync(this.captureDir, { recursive: true });
     appendFileSync(join(this.captureDir, `ticks-${this.day}.jsonl`), `${JSON.stringify(tick)}\n`);
     this.counters.ticks++; this.lastTickAt = this.now();
-    if (this.now() - tick.exchangeTime > SKEW_MS) { this.unskewRun = 0; if (++this.skewRun >= SKEW_RUN) this.skewed = true; }
+    if (Math.abs(this.now() - tick.exchangeTime) > SKEW_MS) { this.unskewRun = 0; if (++this.skewRun >= SKEW_RUN) this.skewed = true; }
     else { this.skewRun = 0; if (++this.unskewRun >= SKEW_RUN) this.skewed = false; }
     let row;
     try { row = this.builder.push(tick); } catch (error) { this.counters.badTicks++; this.log(`Tick rejected: ${error.message}`); return; }
@@ -96,35 +96,56 @@ export class LiveRunner {
     });
   }
   poll() {
-    const now = this.now();
+    const now = this.now(), window = this.sessionWindow;
+    if (!window || !['live', 'disconnected', 'login-needed'].includes(this.state)) return;
     if (this.state === 'live' && this.builder) {
       const row = this.builder.flush(now);
       if (row) this.handleRow(row);
-      if (!this.builder.current && now >= this.sessionWindow.closeMs + FLUSH_GRACE_MS) { this.state = 'closed'; this.stopTimers(); this.source.stop(); this.writeReport(); }
-    } else if (this.state === 'disconnected' && this.builder) {
-      // No prices means no protection: record each bar period that passed without data instead of fabricating a bar.
-      this.gapBarEnd ??= this.builder.current?.end ?? now;
-      if (now >= this.gapBarEnd + FLUSH_GRACE_MS) {
+    } else {
+      // No prices means no protection: record each bar period that passed without data, up to the close, instead of fabricating a bar.
+      const barMs = this.barMinutes() * 60_000;
+      this.gapBarEnd ??= this.builder?.current?.end ?? Math.min(window.openMs + Math.ceil((Math.max(now, window.openMs + 1) - window.openMs) / barMs) * barMs, window.closeMs);
+      while (this.gapBarEnd <= window.closeMs && now >= this.gapBarEnd + FLUSH_GRACE_MS) {
         const barEnd = new Date(this.gapBarEnd).toISOString();
-        this.gapBarEnd += this.barMinutes() * 60_000;
+        this.gapBarEnd = this.gapBarEnd < window.closeMs ? Math.min(this.gapBarEnd + barMs, window.closeMs) : Infinity;
         this.pending = this.pending.then(() => this.run(() => this.engine.store.append('protection-gap', { barEnd, positions: this.engine.state.positions.map(p => p.symbol) })))
           .catch(error => this.log(`Gap record failed: ${error.message}`));
       }
+      // Retries are driven from here: after the first connection the SDK reports a failed attempt only as an error, never a close.
+      if (this.state === 'disconnected' && now < window.closeMs && now >= this.nextAttemptAt) {
+        this.nextAttemptAt = now + Math.min(2 ** this.reconnects++, MAX_BACKOFF_S) * 1000;
+        this.connect();
+      }
+    }
+    if (now >= window.closeMs + FLUSH_GRACE_MS && !(this.state === 'live' && this.builder?.current)) {
+      this.state = 'closed'; this.stopTimers(); this.source.stop(); this.writeReport();
     }
   }
   onClose(reason) {
     this.cleanBarsSinceGap = 0; this.counters.disconnects++;
-    if (reason === 'expired') { this.state = 'login-needed'; this.stopTimers(); return; }
+    if (reason === 'expired') { this.state = 'login-needed'; return; }
     if (this.state !== 'live') return;
     this.state = 'disconnected';
-    const delay = Math.min(2 ** this.reconnects++, MAX_BACKOFF_S) * 1000;
-    this.later(() => { if (this.state === 'disconnected') this.connect(); }, delay);
+    this.nextAttemptAt = this.now() + Math.min(2 ** this.reconnects++, MAX_BACKOFF_S) * 1000;
+  }
+  // After a restart or a missed close, write the last live session's report if it is missing; its counters are incomplete.
+  backfillReport(today) {
+    if (!this.isLive()) return;
+    const lastLive = this.engine.state.dataset.findLast(row => row.source === 'ticks' || row.source === 'thin');
+    if (!lastLive) return;
+    const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(lastLive.timestamp));
+    const sessionOver = !today || day < today.day || this.now() >= today.closeMs;
+    if (!sessionOver || this.engine.store.hasDailyReport(day)) return;
+    if (day !== this.day) this.resetDay(day);
+    this.partial = true;
+    this.writeReport();
   }
   writeReport() {
     const c = this.status().counters, day = this.day;
     const dataQuality = { ticks: c.ticks, dropped: c.dropped ?? 0, outsideSession: c.outsideSession ?? 0, thinBars: c.thinBars ?? 0, badTicks: c.badTicks,
       rejectedRows: c.rejectedRows, disconnects: c.disconnects, barsToday: this.barsToday, skewed: this.skewed, loginAt: this.session.status().issuedAt ?? null };
-    dataQuality.flagged = dataQuality.thinBars > 0.2 * this.barsToday || dataQuality.dropped > 0.01 * dataQuality.ticks || dataQuality.skewed || dataQuality.rejectedRows > 0;
+    dataQuality.partial = this.partial;
+    dataQuality.flagged = dataQuality.partial || dataQuality.thinBars > 0.2 * this.barsToday || dataQuality.dropped > 0.01 * dataQuality.ticks || dataQuality.skewed || dataQuality.rejectedRows > 0;
     this.pending = this.pending.then(() => this.run(() => this.engine.dailyReport(day, dataQuality))).catch(error => this.log(`Daily report failed: ${error.message}`));
   }
   later(fn, ms) {

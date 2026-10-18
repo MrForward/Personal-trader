@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.mjs';
 import { TradingEngine } from '../src/engine.mjs';
+import { charges } from '../src/costs.mjs';
 
 function rows(symbols = ['A'], count = 36) {
   return Array.from({ length: count }, (_, i) => {
@@ -201,8 +202,9 @@ test('a new session day uses prior close equity so an overnight gap counts towar
 test('DP charge applies once per scrip per session day and fills are labelled', async t => {
   const data = rows(); for (const i of [30, 31]) data[i].bars.A = { open: 50, high: 51, low: 49, close: 50, volume: 1000 };
   const { engine } = fixture(t, { dataset: data }); engine.settings({ simulation: { costSchedule: 'zerodha-cnc-2026-10' } });
-  seed(engine, { stopPrice: 60, quantity: 5, cash: 500 }); await step(engine);
-  seed(engine, { stopPrice: 60, quantity: 5, cash: 500 }); await step(engine);
+  // Held from an earlier session, so these are delivery sells, not intraday round trips.
+  seed(engine, { stopPrice: 60, quantity: 5, cash: 500, openedAt: '2019-12-31T09:00:00.000Z' }); await step(engine);
+  seed(engine, { stopPrice: 60, quantity: 5, cash: 500, openedAt: '2019-12-31T09:00:00.000Z' }); await step(engine);
   const sells = engine.state.trades.filter(trade => trade.action === 'SELL');
   assert.equal(sells.length, 2); approx(sells[0].fee - sells[1].fee, 15.34);
   assert.equal(sells[0].fill, 'assumed-open'); assert.equal(sells[0].charges.dp, 15.34); assert.equal(sells[1].charges.dp, 0);
@@ -296,4 +298,17 @@ test('a live run stays live after each step and replay controls are refused', as
   engine.appendBar(bar40()); await liveStep(engine);
   assert.equal(engine.state.status, 'live');
   assert.throws(() => engine.control('start'), /driven by the live feed/);
+});
+
+test('review #5: a same-day round trip is charged at intraday rates with no DP charge', async t => {
+  const data = rows(); data[30].bars.A = { open: 129, high: 131, low: 128, close: 130, volume: 1000 };
+  data[31].bars.A = { open: 100, high: 102, low: 99, close: 101, volume: 1000 };
+  const { engine } = fixture(t, { dataset: data }); engine.settings({ simulation: { costSchedule: 'zerodha-cnc-2026-10', slippageBps: 0 } });
+  await step(engine); await step(engine);
+  const [buy, sell] = engine.state.trades; const I = 'zerodha-intraday-2026-10';
+  const expected = charges({ schedule: I, side: 'BUY', price: buy.price, quantity: buy.quantity, dpApplies: false }).total
+    + charges({ schedule: I, side: 'SELL', price: sell.price, quantity: sell.quantity, dpApplies: false }).total;
+  approx(buy.fee + sell.fee, expected); assert.equal(sell.charges.dp, 0); assert.equal(sell.charges.schedule, I);
+  approx(engine.state.realizedPnl, (sell.price - buy.price) * buy.quantity - expected);
+  approx(engine.state.cash, 1000 + engine.state.realizedPnl);
 });

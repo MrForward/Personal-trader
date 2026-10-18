@@ -167,3 +167,79 @@ test('starting after the close writes a missing report once and stays idle', asy
   await later.runner.start(); await later.runner.idle();
   assert.equal(later.runner.status().state, 'idle'); assert.deepEqual(store.dailyReports().map(row => row.day), ['2026-10-14']);
 });
+
+test('review #1: failed reconnect attempts keep retrying on backoff from poll', async t => {
+  let starts = 0, handlers;
+  const source = { start: h => { handlers = h; starts++; if (starts > 1) h.onError?.(new Error('ECONNREFUSED')); }, stop: () => {} };
+  const { runner, clock } = setup(t, { source });
+  await runner.start();
+  handlers.onTick({ symbol: 'DEMO1', price: 100, cumulativeVolume: 1, exchangeTime: OPEN + 1000 });
+  handlers.onClose('socket');
+  for (const seconds of [1, 2, 4, 8]) { clock.now += seconds * 1000; runner.poll(); }
+  assert.equal(starts, 5); assert.equal(runner.status().state, 'disconnected');
+  handlers.onTick({ symbol: 'DEMO1', price: 100, cumulativeVolume: 2, exchangeTime: clock.now });
+  assert.equal(runner.status().state, 'live');
+});
+
+test('review #2: disconnected at the close still closes, reports, and records gaps only up to the close', async t => {
+  let handlers;
+  const { runner, clock, store } = setup(t, { source: { start: h => { handlers = h; }, stop: () => {} } });
+  await runner.start();
+  handlers.onTick({ symbol: 'DEMO1', price: 100, cumulativeVolume: 1, exchangeTime: T('2026-10-14T09:20:00Z') });
+  handlers.onClose('socket');
+  clock.now = T('2026-10-14T10:30:00Z'); for (let i = 0; i < 5; i++) runner.poll();
+  await runner.idle();
+  assert.equal(runner.status().state, 'closed'); assert.equal(store.dailyReports().length, 1);
+  const gaps = store.audit().filter(row => row.kind === 'protection-gap').map(row => row.payload.barEnd);
+  assert.deepEqual(gaps, ['2026-10-14T09:30:00.000Z', '2026-10-14T09:45:00.000Z', '2026-10-14T10:00:00.000Z']);
+});
+
+test('review #2: an expired session keeps recording protection gaps and still reports at the close', async t => {
+  let handlers;
+  const { runner, clock, store } = setup(t, { source: { start: h => { handlers = h; }, stop: () => {} } });
+  await runner.start();
+  handlers.onTick({ symbol: 'DEMO1', price: 100, cumulativeVolume: 1, exchangeTime: T('2026-10-14T09:40:00Z') });
+  handlers.onClose('expired');
+  clock.now = T('2026-10-14T09:46:00Z'); runner.poll(); await runner.idle();
+  assert.equal(runner.status().state, 'login-needed');
+  assert.deepEqual(store.audit().filter(row => row.kind === 'protection-gap').map(row => row.payload.barEnd), ['2026-10-14T09:45:00.000Z']);
+  clock.now = T('2026-10-14T10:01:00Z'); runner.poll(); await runner.idle();
+  assert.equal(store.dailyReports().length, 1);
+});
+
+test('review #2/#6: the next start back-fills the last live day\'s missing report, flagged partial', async t => {
+  const store = new Store(':memory:'); t.after(() => store.close());
+  const first = setup(t, { store }); await first.runner.start(); await first.runner.idle(); first.runner.stop();
+  const next = setup(t, { store, calendar: () => null, clockStart: T('2026-10-15T03:00:00Z') });
+  await next.runner.start(); await next.runner.idle();
+  const [report] = store.dailyReports();
+  assert.equal(report.day, '2026-10-14'); assert.equal(report.dataQuality.partial, true); assert.equal(report.dataQuality.flagged, true);
+});
+
+test('review #6: a runner started after the open marks its report partial', async t => {
+  let handlers;
+  const { runner, clock, store } = setup(t, { clockStart: T('2026-10-14T05:00:00Z'), source: { start: h => { handlers = h; }, stop: () => {} } });
+  await runner.start();
+  handlers.onTick({ symbol: 'DEMO1', price: 100, cumulativeVolume: 1, exchangeTime: T('2026-10-14T09:50:00Z') });
+  handlers.onTick({ symbol: 'DEMO2', price: 50, cumulativeVolume: 1, exchangeTime: T('2026-10-14T09:50:01Z') });
+  clock.now = T('2026-10-14T10:00:31Z'); runner.poll(); await runner.idle();
+  assert.equal(store.dailyReports()[0].dataQuality.partial, true); assert.equal(store.dailyReports()[0].dataQuality.flagged, true);
+});
+
+test('review #3: a VPS clock behind the exchange is flagged as skew and bars are still applied', async t => {
+  const { engine, runner } = setup(t, { offsetMs: -10_000 });
+  await runner.start(); await runner.idle();
+  assert.equal(runner.status().skewed, true); assert.equal(runner.status().counters.rejectedRows, 0);
+  assert.equal(engine.state.dataset.at(-1).timestamp, '2026-10-14T04:30:00.000Z');
+});
+
+test('review #4: changing only the bar size starts a new live run', async t => {
+  const store = new Store(':memory:'); t.after(() => store.close());
+  // A skewed first run opens no position, so the bar size may change.
+  const first = setup(t, { store, offsetMs: 10_000 }); await first.runner.start(); await first.runner.idle(); first.runner.stop();
+  assert.equal(first.engine.state.positions.length, 0); const runId = first.engine.state.runId;
+  const second = setup(t, { store, source: { start: () => {}, stop: () => {} }, clockStart: T('2026-10-14T05:01:00Z') });
+  second.engine.settings({ barMinutes: 5 });
+  await second.runner.start();
+  assert.notEqual(second.engine.state.runId, runId); assert.equal(second.engine.state.liveBarMinutes, 5);
+});

@@ -4,7 +4,7 @@ import { STRATEGIES, analyzeMarket, chooseStrategy, evaluateStrategy } from './s
 import { makeDemoSeries, DEMO_ASSETS } from './demo-data.mjs';
 import { reviewMarket, providerStatus } from './models.mjs';
 import { validateDataset, parseCsv, validateBar } from './dataset.mjs';
-import { charges, perShareRate } from './costs.mjs';
+import { charges, perShareRate, INTRADAY_OF } from './costs.mjs';
 import { redact } from './secrets.mjs';
 
 const money = n => Math.round(n * 100) / 100;
@@ -190,7 +190,7 @@ export class TradingEngine {
     // Warmup rows come from the broker; validate them like an import. Every warmup row is historical by definition.
     const dataset = validateDataset(rows.map(({ source: _source, ...row }) => row)).rows.map(row => ({ ...row, source: 'historical' }));
     const fresh = newState(this.state.settings, dataset, assets, source, []);
-    fresh.mode = 'prospective-paper'; fresh.status = 'live'; fresh.cursor = dataset.length - 1;
+    fresh.mode = 'prospective-paper'; fresh.status = 'live'; fresh.liveBarMinutes = this.state.settings.barMinutes; fresh.cursor = dataset.length - 1;
     fresh.sessionDay = sessionDay(dataset[fresh.cursor].timestamp);
     return this.commit(fresh, 'live-begin', { runId: fresh.runId, source, rows: dataset.length, symbols: assets.map(asset => asset.symbol) }, { archive: this.state });
   }); }
@@ -267,8 +267,20 @@ export class TradingEngine {
   }); }
   sell(state, position, price, row, reason, phase) {
     const timestamp = row.timestamp, fill = price * (1 - state.settings.simulation.slippageBps / 10000);
-    const dpApplies = !state.trades.some(t => t.action === 'SELL' && t.symbol === position.symbol && sessionDay(t.timestamp) === sessionDay(timestamp));
-    const cost = charges({ schedule: state.settings.simulation.costSchedule, side: 'SELL', price: fill, quantity: position.quantity, dpApplies }), fee = cost.total;
+    const schedule = state.settings.simulation.costSchedule, quantity = position.quantity;
+    let cost;
+    if (sessionDay(position.openedAt) === sessionDay(timestamp)) {
+      // Same-session round trip: Zerodha charges intraday rates on both legs. The buy was charged delivery rates when it
+      // happened, so the sell carries the difference; total fees then equal the intraday buy plus intraday sell.
+      const intraday = INTRADAY_OF[schedule];
+      const sellLeg = charges({ schedule: intraday, side: 'SELL', price: fill, quantity, dpApplies: false });
+      const buyAdjustment = money(charges({ schedule: intraday, side: 'BUY', price: position.entryPrice, quantity, dpApplies: false }).total - position.entryFee);
+      cost = { ...sellLeg, buyAdjustment, total: money(sellLeg.total + buyAdjustment) };
+    } else {
+      const dpApplies = !state.trades.some(t => t.action === 'SELL' && t.symbol === position.symbol && sessionDay(t.timestamp) === sessionDay(timestamp));
+      cost = charges({ schedule, side: 'SELL', price: fill, quantity, dpApplies });
+    }
+    const fee = cost.total;
     const pnl = (fill - position.entryPrice) * position.quantity - fee - position.entryFee;
     state.cash += fill * position.quantity - fee; state.fees += fee; state.realizedPnl += pnl;
     state.trades.push({ id: randomUUID(), timestamp, phase, symbol: position.symbol, action: 'SELL', quantity: position.quantity, price: fill, fee, charges: cost, fill: fillLabel(row),
