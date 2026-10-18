@@ -416,3 +416,25 @@ test('blocked entries are not offered to the decider; held positions still are',
   assert.equal(b.action, 'HOLD'); assert.match(b.outcome, /^Suppressed: entries blocked.*market halt/);
   assert.equal(engine.state.positions.length, 1);
 });
+
+test('user tightenStop: higher stop records a user revision', t => {
+  const { engine } = fixture(t); seed(engine, { stopPrice: 100 });
+  engine.tightenStop('held-position', { stopPrice: 110 });
+  const p = engine.state.positions[0];
+  assert.equal(p.stopPrice, 110); assert.equal(p.stopRevisions.length, 1);
+  assert.deepEqual({ ...p.stopRevisions[0], timestamp: undefined }, { timestamp: undefined, previous: 100, next: 110, source: 'user' });
+});
+test('user tightenStop: equal stop is accepted and recorded as before', t => {
+  const { engine } = fixture(t); seed(engine, { stopPrice: 100 });
+  engine.tightenStop('held-position', { stopPrice: 100 });
+  const p = engine.state.positions[0];
+  assert.equal(p.stopPrice, 100); assert.equal(p.stopRevisions.length, 1);
+  assert.deepEqual({ ...p.stopRevisions[0], timestamp: undefined }, { timestamp: undefined, previous: 100, next: 100, source: 'user' });
+});
+test('user tightenStop: lower stop and stops at or above the mark throw the existing messages', t => {
+  const { engine } = fixture(t); seed(engine, { stopPrice: 100 });
+  assert.throws(() => engine.tightenStop('held-position', { stopPrice: 99 }), /Existing stops may only be tightened\./);
+  const mark = engine.state.positions[0].markPrice;
+  for (const stopPrice of [mark, mark + 1]) assert.throws(() => engine.tightenStop('held-position', { stopPrice }), /Stop must be positive and below the current mark price\./);
+  assert.equal(engine.state.positions[0].stopPrice, 100); assert.equal(engine.state.positions[0].stopRevisions, undefined);
+});

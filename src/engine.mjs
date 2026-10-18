@@ -79,7 +79,9 @@ function stopRefusal(position, stop) {
 }
 // `state` is unused today; kept so callers share one signature with the rest of the engine's state helpers.
 export function applyTighten(state, position, stop, source, timestamp = new Date().toISOString()) {
-  if (stopRefusal(position, stop)) return false;
+  const refusal = stopRefusal(position, stop);
+  // An equal stop is a no-op success for the user dialog (pre-filled with the current stop); only the expert path refuses it.
+  if (refusal && !(refusal === 'unchanged' && source === 'user')) return false;
   const previous = position.stopPrice; position.stopPrice = stop; (position.stopRevisions ??= []).push({ timestamp, previous, next: stop, source });
   return true;
 }
