@@ -59,3 +59,12 @@ test('thesis, daily bars and model outputs round-trip', t => {
   assert.deepEqual({ ...s.modelOutput('k1'), createdAt: undefined }, { ...row, createdAt: undefined });
   assert.equal(typeof s.modelOutput('k1').createdAt, 'string'); assert.equal(s.modelOutput('missing'), null);
 });
+test('lastDecision returns the newest decision output before a time, skipping theses and reviews', t => {
+  const s = store(t);
+  const row = (key, trigger, asOf, symbol = 'INFY') => s.saveModelOutput({ key, engine: 'expert', symbol, trigger, asOf, promptHash: 'h', request: {}, response: { action: 'hold' } });
+  row('a', 'entry', '2026-10-14T04:00:00.000Z'); row('b', 'stale-review', '2026-10-15T04:00:00.000Z'); row('c', 'thesis', '2026-10-16T03:15:00.000Z');
+  row('d', 'review', '2026-10-16T12:00:00.000Z'); row('e', 'entry', '2026-10-17T04:00:00.000Z', 'SBIN');
+  assert.equal(s.lastDecision('INFY').key, 'b'); assert.deepEqual(s.lastDecision('INFY').response, { action: 'hold' });
+  assert.equal(s.lastDecision('INFY', '2026-10-15T04:00:00.000Z').key, 'a');
+  assert.equal(s.lastDecision('INFY', '2026-10-14T04:00:00.000Z'), null); assert.equal(s.lastDecision('ITC'), null);
+});

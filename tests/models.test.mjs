@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { providerStatus, reviewMarket, runClaudeCode, validateModelConfig } from '../src/models.mjs';
+import { providerStatus, reviewMarket, runClaudeCode, schemaErrors, validateModelConfig } from '../src/models.mjs';
 
 const FAKE_OPENAI_KEY = 'test-openai-key-not-a-real-credential';
 const FAKE_ANTHROPIC_KEY = 'test-anthropic-key-not-a-real-credential';
@@ -273,4 +273,12 @@ test('providerStatus reports the Claude Code OAuth token', () => {
     process.env.CLAUDE_CODE_OAUTH_TOKEN = 'tok'; assert.equal(providerStatus().claudeCode, true);
     delete process.env.CLAUDE_CODE_OAUTH_TOKEN; assert.equal(providerStatus().claudeCode, false);
   } finally { if (previous !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = previous; }
+});
+
+test('schemaErrors accepts array-valued type including null', () => {
+  const schema = { type: 'object', properties: { stop: { type: ['number', 'null'] } } };
+  assert.deepEqual(schemaErrors({ stop: null }, schema), []);
+  assert.deepEqual(schemaErrors({ stop: 101.5 }, schema), []);
+  assert.deepEqual(schemaErrors({ stop: 'x' }, schema), ['$.stop must be number or null']);
+  assert.deepEqual(schemaErrors(null, { type: 'number' }), ['$ must be number']);
 });

@@ -246,11 +246,12 @@ export async function reviewMarket({ model, context, fetchImpl = globalThis.fetc
 const modelError = (code, message, extra = {}) => Object.assign(new Error(redact(message)), { code, ...extra });
 
 // shortcut: covers only the JSON Schema keywords this project uses; upgrade if schemas grow (oneOf, pattern, $ref).
-function schemaErrors(value, schema, path = '$') {
-  const { type } = schema;
-  if (type === 'object' ? !isObject(value) : type === 'array' ? !Array.isArray(value)
-    : type === 'integer' ? !Number.isInteger(value) : type === 'number' ? typeof value !== 'number' || !Number.isFinite(value)
-    : type && typeof value !== type) return [`${path} must be ${type}`];
+const isType = (value, type) => type === 'null' ? value === null : type === 'object' ? isObject(value) : type === 'array' ? Array.isArray(value)
+  : type === 'integer' ? Number.isInteger(value) : type === 'number' ? typeof value === 'number' && Number.isFinite(value) : typeof value === type;
+
+export function schemaErrors(value, schema, path = '$') {
+  const types = [schema.type ?? []].flat();
+  if (types.length && !types.some((type) => isType(value, type))) return [`${path} must be ${types.join(' or ')}`];
   if (schema.enum && !schema.enum.includes(value)) return [`${path} not in enum`];
   if (typeof value === 'string' && value.length > (schema.maxLength ?? Infinity)) return [`${path} too long`];
   if (typeof value === 'number' && (value < (schema.minimum ?? -Infinity) || value > (schema.maximum ?? Infinity))) return [`${path} out of range`];
