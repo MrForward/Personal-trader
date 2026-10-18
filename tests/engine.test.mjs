@@ -16,7 +16,7 @@ function fixture(t, { dataset = rows(), path = ':memory:', ...options } = {}) {
   const store = new Store(path); t.after(() => { try { store.close(); } catch {} });
   const engine = new TradingEngine(store, options);
   engine.importDataset({ rows: dataset, name: 'test fixture' });
-  engine.settings({ strategy: { mode: 'momentum' }, simulation: { startingCapital: 1000, feeBps: 0, slippageBps: 0 },
+  engine.settings({ strategy: { mode: 'momentum' }, simulation: { startingCapital: 1000, costSchedule: 'none', slippageBps: 0 },
     risk: { stopLossPct: 20, takeProfitPct: 100, maxPositionPct: 100, maxExposurePct: 100, maxDrawdownPct: 50, maxDailyLossPct: 50, riskPerTradePct: 5 } });
   return { engine, store };
 }
@@ -103,7 +103,7 @@ test('a trailing level derived from the high becomes active only on the next bar
 test('entry and exit fees/slippage reconcile to cash and realized PnL', async t => {
   const data = rows(); data[30].bars.A = { open: 129, high: 131, low: 128, close: 130, volume: 1000 };
   data[31].bars.A = { open: 100, high: 102, low: 99, close: 101, volume: 1000 };
-  const { engine } = fixture(t, { dataset: data }); engine.settings({ simulation: { feeBps: 10, slippageBps: 10 } });
+  const { engine } = fixture(t, { dataset: data }); engine.settings({ simulation: { costSchedule: 'zerodha-cnc-2026-10', slippageBps: 10 } });
   await step(engine); assert.equal(engine.state.trades[0].action, 'BUY');
   await step(engine); const [buy, sell] = engine.state.trades;
   assert.equal(sell.action, 'SELL'); assert.equal(engine.state.positions.length, 0);
@@ -196,4 +196,14 @@ test('a new session day uses prior close equity so an overnight gap counts towar
   assert.equal(engine.state.metrics.sessionDay, '2020-01-02');
   assert.equal(engine.state.metrics.sessionStartingEquity, 1000);
   assert.equal(engine.state.status, 'risk-paused'); assert.equal(engine.state.trades.length, 0);
+});
+
+test('DP charge applies once per scrip per session day and fills are labelled', async t => {
+  const data = rows(); for (const i of [30, 31]) data[i].bars.A = { open: 50, high: 51, low: 49, close: 50, volume: 1000 };
+  const { engine } = fixture(t, { dataset: data }); engine.settings({ simulation: { costSchedule: 'zerodha-cnc-2026-10' } });
+  seed(engine, { stopPrice: 60, quantity: 5, cash: 500 }); await step(engine);
+  seed(engine, { stopPrice: 60, quantity: 5, cash: 500 }); await step(engine);
+  const sells = engine.state.trades.filter(trade => trade.action === 'SELL');
+  assert.equal(sells.length, 2); approx(sells[0].fee - sells[1].fee, 15.34);
+  assert.equal(sells[0].fill, 'assumed-open'); assert.equal(sells[0].charges.dp, 15.34); assert.equal(sells[1].charges.dp, 0);
 });

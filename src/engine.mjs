@@ -4,10 +4,12 @@ import { STRATEGIES, analyzeMarket, chooseStrategy, evaluateStrategy } from './s
 import { makeDemoSeries, DEMO_ASSETS } from './demo-data.mjs';
 import { reviewMarket, providerStatus } from './models.mjs';
 import { validateDataset, parseCsv } from './dataset.mjs';
+import { charges, perShareRate } from './costs.mjs';
 
 const money = n => Math.round(n * 100) / 100;
 const clone = value => structuredClone(value);
 const SESSION_TIMEZONE = 'Asia/Kolkata';
+const fillLabel = row => row.source === 'ticks' ? 'observed-open' : 'assumed-open';
 const sessionDay = stamp => new Intl.DateTimeFormat('en-CA', { timeZone: SESSION_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(stamp));
 export const INITIAL_CURSOR = 29;
 
@@ -226,12 +228,13 @@ export class TradingEngine {
       throw error;
     }
   }); }
-  sell(state, position, price, timestamp, reason, phase) {
-    const fill = price * (1 - state.settings.simulation.slippageBps / 10000);
-    const fee = fill * position.quantity * state.settings.simulation.feeBps / 10000;
+  sell(state, position, price, row, reason, phase) {
+    const timestamp = row.timestamp, fill = price * (1 - state.settings.simulation.slippageBps / 10000);
+    const dpApplies = !state.trades.some(t => t.action === 'SELL' && t.symbol === position.symbol && sessionDay(t.timestamp) === sessionDay(timestamp));
+    const cost = charges({ schedule: state.settings.simulation.costSchedule, side: 'SELL', price: fill, quantity: position.quantity, dpApplies }), fee = cost.total;
     const pnl = (fill - position.entryPrice) * position.quantity - fee - position.entryFee;
     state.cash += fill * position.quantity - fee; state.fees += fee; state.realizedPnl += pnl;
-    state.trades.push({ id: randomUUID(), timestamp, phase, symbol: position.symbol, action: 'SELL', quantity: position.quantity, price: fill, fee,
+    state.trades.push({ id: randomUUID(), timestamp, phase, symbol: position.symbol, action: 'SELL', quantity: position.quantity, price: fill, fee, charges: cost, fill: fillLabel(row),
       realizedPnl: pnl, reason, strategyId: position.strategyId, configVersion: position.configVersion });
     state.positions = state.positions.filter(p => p.id !== position.id);
   }
@@ -241,9 +244,9 @@ export class TradingEngine {
       const capital = state.settings.simulation.startingCapital;
       const fraction = book.capped ? Math.min(state.settings.risk.maxExposurePct / 100 / state.assets.length, state.settings.risk.maxPositionPct / 100) : 1 / state.assets.length;
       for (const asset of state.assets) {
-        const price = row.bars[asset.symbol].open * (1 + state.settings.simulation.slippageBps / 10000);
-        const quantity = Math.floor(capital * fraction / (price * (1 + state.settings.simulation.feeBps / 10000)));
-        const fee = quantity * price * state.settings.simulation.feeBps / 10000;
+        const price = row.bars[asset.symbol].open * (1 + state.settings.simulation.slippageBps / 10000), schedule = state.settings.simulation.costSchedule;
+        const quantity = Math.floor(capital * fraction / (price * (1 + perShareRate(schedule, 'BUY'))));
+        const fee = charges({ schedule, side: 'BUY', price, quantity, dpApplies: false }).total;
         book.positions.push({ symbol: asset.symbol, quantity, entryPrice: price });
         book.cash -= quantity * price + fee; book.fees += fee;
       }
@@ -285,9 +288,9 @@ export class TradingEngine {
       this.initializeBenchmarks(s, next);
       for (const p of [...s.positions]) {
         const bar = next.bars[p.symbol], proposal = proposals.find(item => item.asset.symbol === p.symbol);
-        if (bar.open <= p.stopPrice) { this.sell(s, p, bar.open, next.timestamp, 'Gap protective stop', 'open'); proposal.decision.outcome = 'Gap stop filled'; }
-        else if (bar.open >= p.takeProfitPrice) { this.sell(s, p, bar.open, next.timestamp, 'Gap profit target', 'open'); proposal.decision.outcome = 'Gap target filled'; }
-        else if (proposal.candidate.action === 'SELL') { this.sell(s, p, bar.open, next.timestamp, proposal.candidate.reason, 'open'); proposal.decision.outcome = 'Paper strategy sell filled'; }
+        if (bar.open <= p.stopPrice) { this.sell(s, p, bar.open, next, 'Gap protective stop', 'open'); proposal.decision.outcome = 'Gap stop filled'; }
+        else if (bar.open >= p.takeProfitPrice) { this.sell(s, p, bar.open, next, 'Gap profit target', 'open'); proposal.decision.outcome = 'Gap target filled'; }
+        else if (proposal.candidate.action === 'SELL') { this.sell(s, p, bar.open, next, proposal.candidate.reason, 'open'); proposal.decision.outcome = 'Paper strategy sell filled'; }
       }
       // Phase 2: every next-open entry precedes every intrabar exit. Later cash is unavailable here.
       for (const { asset, candidate, decision } of proposals) {
@@ -296,30 +299,32 @@ export class TradingEngine {
         const intel = decision.inputSnapshot.intelligence;
         if (s.riskLatched) { decision.outcome = 'Rejected: latched portfolio loss cap'; continue; }
         if (intel?.entryBlocked) { decision.outcome = `Rejected: intelligence veto (${(intel.blockReasons ?? intel.entryBlockReasons ?? ['entry blocked']).join('; ')})`; continue; }
-        const bar = next.bars[asset.symbol], price = bar.open * (1 + s.settings.simulation.slippageBps / 10000), risk = s.settings.risk;
-        const feeRate = s.settings.simulation.feeBps / 10000, cashCost = price * (1 + feeRate), equityCost = cashCost - bar.open;
+        const bar = next.bars[asset.symbol], price = bar.open * (1 + s.settings.simulation.slippageBps / 10000), risk = s.settings.risk, schedule = s.settings.simulation.costSchedule;
+        const feeRate = perShareRate(schedule, 'BUY'), sellRate = perShareRate(schedule, 'SELL'), cashCost = price * (1 + feeRate), equityCost = cashCost - bar.open;
         const stopPrice = price * (1 - risk.stopLossPct / 100), stopFill = stopPrice * (1 - s.settings.simulation.slippageBps / 10000);
-        const plannedLoss = price - stopFill + price * feeRate + stopFill * feeRate;
+        const plannedLoss = price - stopFill + price * feeRate + stopFill * sellRate, dpCharge = charges({ schedule, side: 'SELL', price: 1, quantity: 1, dpApplies: true }).dp;
         const positionCap = risk.maxPositionPct / 100, exposureCap = risk.maxExposurePct / 100, riskCap = risk.riskPerTradePct / 100;
-        const quantity = Math.max(0, Math.floor(Math.min(Number.MAX_SAFE_INTEGER, s.cash / cashCost,
+        let quantity = Math.max(0, Math.floor(Math.min(Number.MAX_SAFE_INTEGER, s.cash / cashCost,
           values.equity * positionCap / (price + positionCap * equityCost),
           (values.equity * exposureCap - values.exposure) / (bar.open + exposureCap * equityCost),
           values.equity * riskCap / (plannedLoss + riskCap * equityCost))));
+        // The flat DP charge on the eventual sell is part of the planned loss; shrink the size if it breaks the risk budget.
+        if (quantity && plannedLoss * quantity + dpCharge > values.equity * riskCap) quantity = Math.max(0, Math.floor((values.equity * riskCap - dpCharge) / plannedLoss));
         if (!quantity) { decision.outcome = 'Rejected: cash, allocation, exposure or planned risk limit'; continue; }
-        const fee = quantity * price * feeRate;
+        const cost = charges({ schedule, side: 'BUY', price, quantity, dpApplies: false }), fee = cost.total;
         const p = { id: randomUUID(), symbol: asset.symbol, quantity, entryPrice: price, markPrice: bar.open, entryFee: fee, stopPrice,
           takeProfitPrice: price * (1 + risk.takeProfitPct / 100), trailingStopPct: risk.trailingStopPct, peakPrice: price,
           strategyId: candidate.strategyId, configVersion: s.settings.version, openedAt: next.timestamp };
         s.positions.push(p); s.cash -= quantity * price + fee; s.fees += fee;
-        s.trades.push({ id: randomUUID(), timestamp: next.timestamp, phase: 'open', symbol: asset.symbol, action: 'BUY', quantity, price, fee, realizedPnl: 0,
+        s.trades.push({ id: randomUUID(), timestamp: next.timestamp, phase: 'open', symbol: asset.symbol, action: 'BUY', quantity, price, fee, charges: cost, fill: fillLabel(next), realizedPnl: 0,
           strategyId: candidate.strategyId, configVersion: s.settings.version, reason: candidate.reason });
         decision.outcome = 'Paper buy filled';
       }
       // Phase 3: use the stop fixed at the bar open. If both levels touch, stop is first.
       for (const p of [...s.positions]) {
         const bar = next.bars[p.symbol];
-        if (bar.low <= p.stopPrice) this.sell(s, p, p.stopPrice, next.timestamp, 'Intrabar protective stop (stop first if both levels touch)', 'intrabar');
-        else if (bar.high >= p.takeProfitPrice) this.sell(s, p, p.takeProfitPrice, next.timestamp, 'Intrabar profit target', 'intrabar');
+        if (bar.low <= p.stopPrice) this.sell(s, p, p.stopPrice, next, 'Intrabar protective stop (stop first if both levels touch)', 'intrabar');
+        else if (bar.high >= p.takeProfitPrice) this.sell(s, p, p.takeProfitPrice, next, 'Intrabar profit target', 'intrabar');
         else if (p.trailingStopPct > 0) {
           p.peakPrice = Math.max(p.peakPrice, bar.high);
           p.stopPrice = Math.max(p.stopPrice, p.peakPrice * (1 - p.trailingStopPct / 100));
