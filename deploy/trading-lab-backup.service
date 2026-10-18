@@ -1,0 +1,15 @@
+[Unit]
+Description=Trading Lab daily database and tick backup
+
+[Service]
+Type=oneshot
+User=trading-lab
+Group=trading-lab
+WorkingDirectory=/opt/trading-lab
+ExecStart=/usr/bin/node /opt/trading-lab/deploy/backup.mjs /var/lib/trading-lab/trading-lab.sqlite /var/lib/trading-lab/backups
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trading-lab

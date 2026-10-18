@@ -1,67 +1,117 @@
-# Private deployment
+# Private deployment (Phase 1: live paper on a VPS)
 
-> **Unverified deployment draft:** the local paper dashboard now has its server and browser controller, but these deployment templates have not been built or deployed. Read [the current checkpoint](../docs/RESUME-PLAN.md) before using them. No cloud purchase or deployment is authorized.
+This runs one Node 24 service: the dashboard, the paper ledger and the live Kite price feed. Orders are simulated; nothing is sent to the broker. The design is in [the Phase 1 spec](../docs/superpowers/specs/2026-10-17-phase1-live-paper-design.md).
 
-This runs the lightweight Node 24 dashboard, synthetic market and paper ledger in one process. It does not launch the optional eve development runtime, connect a broker, or enable real trading. Deployments and account purchases require the owner's action; these files do not provision anything.
+**Status:** written against the code, not yet run on a real VPS. The first deploy is Task 10 of the [Phase 1 plan](../docs/superpowers/plans/2026-10-17-phase1-live-paper.md).
 
-The dashboard has no public authentication. Keep its host port on `127.0.0.1` and use SSH forwarding. Add authentication and TLS before considering public access.
+## 1. What you buy (checked 17 October 2026)
 
-## Lightsail size and cost
+| Item | Cost | Notes |
+|---|---|---|
+| Kite Connect app, **Connect (paid)** tier | ₹500/month per app | The free Personal tier has no live or historical data. [Pricing](https://support.zerodha.com/category/trading-and-markets/general-kite/kite-api/articles/historical-data-and-live-market-data-payment-plan) |
+| AWS Lightsail Linux, **1 GB** plan, Mumbai region | $7/month | Static IP included, which Zerodha requires for API orders in a later live stage. [Pricing](https://aws.amazon.com/lightsail/pricing/) |
 
-As checked on 13 October 2026, [AWS Lightsail's Linux/Unix public-IPv4 bundles](https://aws.amazon.com/lightsail/pricing/) list **$5/month for 0.5 GB memory** and **$7/month for 1 GB**. The $5 plan is a starting point for this small, single-service lab, not a measured capacity guarantee. Monitor memory; use the 1 GB plan if the workload needs it. Model API usage, taxes, backups and any future market-data/broker API subscriptions cost extra. No local LLM or heavy backtesting engine runs on this VM.
+Taxes and any model calls are extra. Recheck both prices before buying.
 
-## Node service on Linux
+## 2. Kite Connect app
 
-Install an official Node 24 LTS build first and confirm `/usr/bin/node --version` reports v24 or later. Adjust `ExecStart` if your binary is elsewhere. Copy the application's `src/` and `public/` directories to `/opt/trading-lab`; the service does not need the eve packages or `node_modules`.
+1. Sign in at [developers.kite.trade](https://developers.kite.trade) with your Zerodha account and create an app of type **Connect**.
+2. Set the redirect URL to exactly `http://127.0.0.1:3000/kite/callback`. Through the SSH tunnel, that address reaches the VPS.
+3. Pay the subscription. Keep the **API key** and **API secret**. They go only into `/etc/trading-lab.env` on the VPS, never chat, Git or screenshots.
 
-Run these setup commands on the chosen host as its administrator:
+## 3. VPS setup
+
+Create a Lightsail instance in **Mumbai** with **Ubuntu 24.04** on the 1 GB plan, attach the static IP it offers, and limit the firewall to SSH (port 22) from your own address. Then on the VPS:
 
 ```sh
+sudo apt-get update && sudo apt-get install -y rsync curl
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo bash - && sudo apt-get install -y nodejs
+node --version   # must print v24 or later
+sudo ufw allow 22/tcp && sudo ufw --force enable
 sudo useradd --system --home-dir /var/lib/trading-lab --shell /usr/sbin/nologin trading-lab
 sudo install -d -o root -g root -m 0755 /opt/trading-lab
-sudo install -o root -g root -m 0644 deploy/trading-lab.service /etc/systemd/system/trading-lab.service
-sudo install -o root -g root -m 0600 .env.example /etc/trading-lab.env
+sudo install -d -o trading-lab -g trading-lab -m 0700 /var/lib/trading-lab
+```
+
+Create the environment file (root-only):
+
+```sh
+sudo install -o root -g root -m 0600 /dev/null /etc/trading-lab.env
 sudoedit /etc/trading-lab.env
 ```
 
-In `/etc/trading-lab.env`, keep `TRADING_LAB_HOST=127.0.0.1` and set `TRADING_LAB_DB_PATH=/var/lib/trading-lab/trading-lab.sqlite`. Enter only the provider key you intend to use, or leave both blank for rules mode. The service runs unprivileged; its SQLite database lives outside the application release directory. Restrict inbound firewall access to SSH from your own address; leave port 3000 closed.
-
-After the app files are copied:
+with:
 
 ```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now trading-lab
-sudo systemctl status trading-lab
-sudo journalctl -u trading-lab --since today
+KITE_API_KEY=your_api_key
+KITE_API_SECRET=your_api_secret
+TRADING_LAB_HOST=127.0.0.1
+TRADING_LAB_PORT=3000
+TRADING_LAB_DB_PATH=/var/lib/trading-lab/trading-lab.sqlite
+TRADING_LAB_ALLOW_PAID_MODEL_CALLS=0
 ```
 
-From your own computer, replacing the user and address with those of your VM:
+## 4. Deploy
+
+From your laptop, in the project folder:
 
 ```sh
-ssh -N -L 3000:127.0.0.1:3000 ubuntu@YOUR_SERVER_IP
+deploy/deploy.sh ubuntu@YOUR_STATIC_IP
 ```
 
-Open `http://127.0.0.1:3000` locally. Keep that SSH connection open while using the dashboard. The VM does not require a public dashboard port.
+It copies `src`, `public` and `deploy`, runs `npm ci --omit=dev`, installs the service and backup timer, restarts the service and prints `active` on success. Run it again for every update.
 
-The restart policy recovers a failed process with a bounded restart rate. It preserves the database; it does not imply that a future real broker position has been reconciled. Review repeated failures before restarting again. Before replacing app files or backing up the ledger, stop the service and copy the whole data directory, including any SQLite WAL/SHM files; then restart. Keep backup access private and test restore separately.
+## 5. Daily login (every trading morning, before 09:15 IST)
 
-## Optional container
-
-Docker adds overhead on a 0.5 GB VM, so the direct Node service is the lighter option. The container deliberately binds internally to `0.0.0.0` so port publishing works; the host publication must remain loopback-only.
-
-From the project root:
+Kite tokens for personal apps expire at 06:00 IST and cannot be refreshed automatically.
 
 ```sh
-docker build -f deploy/Dockerfile -t trading-lab .
-docker volume create trading-lab-data
-docker run -d --name trading-lab --restart on-failure:5 --env-file .env \
-  -e TRADING_LAB_HOST=0.0.0.0 \
-  -e TRADING_LAB_DB_PATH=/data/trading-lab.sqlite \
-  -p 127.0.0.1:3000:3000 \
-  -v trading-lab-data:/data trading-lab
+ssh -N -L 3000:127.0.0.1:3000 ubuntu@YOUR_STATIC_IP
 ```
 
-Create `.env` from `.env.example` first; real keys stay outside the image. A named volume persists data across container replacement. Use the same SSH forwarding command for remote access. Do not run the systemd service and container on port 3000 simultaneously.
+Open `http://127.0.0.1:3000`. The Broker connection panel shows **Login needed**. Click **Login to Kite**, complete the Zerodha login and TOTP, and you land back on the dashboard with the session valid until 06:00 IST the next day. You can close the tunnel afterwards; the service keeps running.
+
+Until you log in, the bot opens no new paper positions. Weekends and NSE holidays need no login.
+
+## 6. What runs where
+
+| Path | Contents |
+|---|---|
+| `/opt/trading-lab` | Application code (root-owned, read-only to the service) |
+| `/var/lib/trading-lab/trading-lab.sqlite` | Paper ledger, settings, Kite session, daily reports |
+| `/var/lib/trading-lab/ticks/ticks-YYYY-MM-DD.jsonl` | Every tick received, written before use; replays a day exactly |
+| `/var/lib/trading-lab/backups/` | Daily copies at 16:00 IST on weekdays, kept 30 days |
+| `/etc/trading-lab.env` | Secrets (root-only) |
+
+Logs: `sudo journalctl -u trading-lab --since today`. Backups: `sudo journalctl -u trading-lab-backup`.
+
+## 7. Restore a backup
+
+```sh
+sudo systemctl stop trading-lab
+sudo -u trading-lab cp /var/lib/trading-lab/backups/trading-lab-YYYY-MM-DD.sqlite /var/lib/trading-lab/trading-lab.sqlite
+sudo rm -f /var/lib/trading-lab/trading-lab.sqlite-wal /var/lib/trading-lab/trading-lab.sqlite-shm
+sudo systemctl start trading-lab
+```
+
+The service starts paused until it has reloaded state; log in again if the restored session has expired. Test a restore once before Phase 1 day 1.
+
+## 8. Before Phase 1 day 1: manual check
+
+1. `systemctl is-active trading-lab` prints `active`.
+2. Tunnel in, log in to Kite, panel shows the session as valid.
+3. During market hours: panel shows **Live** with the last tick updating; after one bar (15 minutes) a decision appears in the journal.
+4. `sudo systemctl restart trading-lab`, reload the dashboard: state restored, feed back to **Live** without a new login.
+5. `ls /var/lib/trading-lab/ticks/` shows today's file; `sudo systemctl start trading-lab-backup` writes a backup.
+6. Restore that backup once (section 7).
+
+Record the result in [the resume plan](../docs/RESUME-PLAN.md).
+
+## Restarts and failures
+
+systemd restarts a crashed process up to five times a minute. A storage failure stops the live feed and exits so the service restarts paused. A restart never re-places anything with a broker: in Phase 1 there is nothing to re-place. Review repeated failures in the journal before restarting by hand.
+
+The dashboard has no authentication. Never open port 3000 in the firewall; use the SSH tunnel.
 
 ## Model access
 

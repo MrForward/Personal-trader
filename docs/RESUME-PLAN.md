@@ -1,13 +1,28 @@
 # Development checkpoint and resume plan
 
-- **Checkpoint date:** 16 October 2026, Asia/Kolkata
+- **Checkpoint date:** 17 October 2026, Asia/Kolkata
 - **Status:** Owner resumed local paper implementation on 13 October 2026 after the documentation pause; current build and verification status is below
 - **Scope:** Current work is local implementation and verification; preserve planning context and distinguish later spending/integration/live decisions
 - **References:** [PRD](PRD.md), [Engineering Statement of Direction](ESOD.md), [PRFAQ](PRFAQ.md)
 - **Required context:** [Retained agreements and lifecycle tools](LIFECYCLE-AGREEMENTS.md)
 - **Research correction:** [Continuous market intelligence](MARKET-INTELLIGENCE.md), including permitted sources, temporal availability, rumor controls and independent protection
 
-## Current implementation checkpoint — 16 October 2026
+## Phase 1 build — 17 October 2026
+
+The goal is restated in [GOAL.md](GOAL.md). Phase 1 (prospective paper trading on live Kite data from a VPS) is designed in the [Phase 1 spec](superpowers/specs/2026-10-17-phase1-live-paper-design.md) and built per the [Phase 1 plan](superpowers/plans/2026-10-17-phase1-live-paper.md), Tasks 1–9, on branch `phase1-live-paper`:
+
+- `src/costs.mjs`: Zerodha CNC charge schedule (STT, exchange, SEBI, stamp, GST, DP once per scrip per day) replaces the flat fee; sizing counts the DP charge.
+- `src/bars.mjs`: ticks to closed bars aligned to 09:15 IST; late/outside-session ticks dropped and counted; thin bars when a symbol had no tick.
+- `src/calendar.mjs`: NSE 2026 trading holidays (hand-maintained yearly).
+- `src/kite.mjs`, `src/secrets.mjs`: Kite login, 06:00 IST expiry, instrument lookup, closed-only warmup bars, full-mode tick source; one SDK ticker per process with SDK reconnect off (the SDK exits the process when its own retries run out).
+- `src/live.mjs`: tick capture before use, one engine step per closed bar, entries blocked for two clean bars after a gap and on clock skew, protection-gap records while disconnected, catch-up after restart, daily report at the close.
+- Engine: `beginLive`, `appendBar`, `catchUp`, `blockEntries`, `dailyReport`; live runs stay `live`.
+- Server and dashboard: `/kite/login`, `/kite/callback`, `/api/kite/status`, `/api/reports`; Kite status panel, Reports view, new settings (universe, bar size, fixed costs, spend cap).
+- `deploy/`: `deploy.sh`, backup script and timer, rewritten README with the owner steps. The Docker path was removed (the server refuses non-loopback binds and the spec has no Docker in Phase 1).
+
+**Verification:** `npm test` passes (unit, integration and a recorded-tick replay that reproduces the ledger exactly); `npm run typecheck` passes; the dashboard was checked in a browser in replay and live modes. **Not verified:** any real Kite login, live tick stream or VPS deploy; that is Task 10 and needs the owner's Kite app and Lightsail instance. The default universe is a placeholder until the owner confirms it.
+
+## Earlier checkpoint — 16 October 2026
 
 The local paper dashboard now has a Node server, browser controls, persistent SQLite ledger, configurable strategies/risk settings, model profiles with paid calls disabled by default, replay/import/export, and captured-intelligence display/import. The optional eve diagnostic agent has a single read-only snapshot tool; shell and file defaults are disabled. The dashboard is loopback-only. No live feed, news API, TradingView account, Zerodha account, paid model call, subscription, VM or real order is connected.
 
@@ -17,7 +32,7 @@ Captured intelligence covers publication/receipt/analysis-ready times, deduplica
 
 **Verification status:** 30 strategy/model/intelligence tests previously passed together; 28 engine/config/store/dataset regression tests were reported by the implementation agent. A separate server API test run first passed 4 of 5 cases. The remaining case used Node fetch, which rewrites the Host header; the test now uses raw HTTP to check host-rebinding rejection. That corrected case and a clean full-suite rerun are pending. TypeScript had passed before the last diagnostic-tool edit; typecheck has not been repeated. Browser rendering and the full browser-to-ledger flow have not yet been verified. Do not report this application as fully verified until these checks pass.
 
-**Repository status:** The project is now its own local Git repository on branch main, at commit 4ed3964. The working tree was clean after the initial commit; this checkpoint update is being saved separately. No GitHub remote is configured, and there is no gh executable available in this environment. A GitHub push needs a repository URL and an authenticated Git transport or GitHub integration. The parent Ideas checkout contains unrelated content and is excluded from this project's repository.
+**Repository status (updated 17 October 2026):** The repository is on GitHub at [MrForward/Personal-trader](https://github.com/MrForward/Personal-trader). Phase 1 work is on branch `phase1-live-paper`; `main` holds the earlier checkpoint.
 
 ## Direction and open decisions
 
@@ -43,7 +58,7 @@ Strategy edge is unsolved. The 1–2% daily aspiration is not a forecast or acce
 | HTTP service | Intended `src/server.mjs` | Missing; no runnable full dashboard backend. |
 | Agent | `agent/agent.ts`, `agent/channels/eve.ts`, `agent/instructions.md` | eve scaffold; generic instructions, constrained diagnostics not implemented. |
 | Metadata | `package.json`, `package-lock.json`, `tsconfig.json`, `.env.example`, `.gitignore`, `AGENTS.md`, `CLAUDE.md` | Preserved; full typecheck/package consistency unverified. Real keys were not added by this work. |
-| Deployment templates | `deploy/Dockerfile`, `deploy/trading-lab.service`, `deploy/README.md` | Drafts, not built/deployed; reference a missing server. |
+| Deployment templates | `deploy/trading-lab.service`, `deploy/README.md` (Dockerfile removed 17 October 2026) | Superseded by the Phase 1 build above; not yet deployed. |
 
 No application tests were rerun after the pause. No VM was purchased/provisioned, no broker account connected, no trade submitted and no application server started. No development commit or PR was created. Preserve these files; do not treat them as a working deployment.
 

@@ -6,6 +6,7 @@
 |---|---|
 | [Goal](GOAL.md) | One-page statement of what the bot is for, the phases, hard constraints and owner decisions. Read first. |
 | [Phase 1 design](superpowers/specs/2026-10-17-phase1-live-paper-design.md) | Prospective paper trading on live Kite data from a VPS: what to buy, architecture, daily login, costs, tests. |
+| [Phase 1 plan](superpowers/plans/2026-10-17-phase1-live-paper.md) | Task-by-task implementation plan for the Phase 1 design. |
 | [PRFAQ](PRFAQ.md) | Intended experience, proposed future announcement and product/model/risk/cost FAQs. |
 | [PRD](PRD.md) | Scope, scenarios, requirements, acceptance criteria, evaluation and staged rollout. |
 | [ESOD — Engineering Statement of Direction](ESOD.md) | Architecture, permission boundaries, tradeoffs and dependencies. |
