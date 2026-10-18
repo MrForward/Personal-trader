@@ -126,6 +126,12 @@ export class Store {
     this.db.prepare('INSERT OR IGNORE INTO model_outputs(key,engine,symbol,trigger,asOf,promptHash,request,response,usage,costUsd,createdAt) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
       .run(key, engine, symbol, trigger, asOf, promptHash, JSON.stringify(request), JSON.stringify(response), JSON.stringify(usage), costUsd, createdAt);
   }
+  // Recorded model calls created on `day` (UTC date prefix; sessions never cross it), with estimated API-equivalent cost.
+  callsFor(day) {
+    const rows = this.db.prepare('SELECT trigger,costUsd FROM model_outputs WHERE createdAt LIKE ?').all(`${day}%`), byTrigger = {};
+    for (const row of rows) byTrigger[row.trigger] = (byTrigger[row.trigger] ?? 0) + 1;
+    return { count: rows.length, costUsd: rows.reduce((total, row) => total + (row.costUsd ?? 0), 0), byTrigger };
+  }
   modelOutput(key) { return outputRow(this.db.prepare('SELECT * FROM model_outputs WHERE key=?').get(key)); }
   // Newest decision-call output for a symbol strictly before `before` (an ISO time), so a replay never sees its own future. Recorded suppressions are not decisions.
   lastDecision(symbol, before = '9999') {

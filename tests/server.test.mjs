@@ -128,12 +128,17 @@ test('health reports mode and kite state', async t => {
   assert.equal(health.mode, 'paper'); assert.equal(health.kite, 'none'); assert.equal(health.liveTrading, false); assert.equal(health.lastTickAt, null);
 });
 
-test('reports route returns saved daily reports', async t => {
+test('reports route pairs rules and expert reports by day; scorecard route answers the exit bar', async t => {
   const { app, base } = await workspace(t);
   assert.deepEqual(await (await fetch(base + '/api/reports')).json(), []);
   app.engine.dailyReport('2026-10-14', { ticks: 0, flagged: false });
+  app.engine.dailyReport('2026-10-15', { ticks: 0, flagged: false });
+  app.expertEngine.dailyReport('2026-10-14', { ticks: 0, flagged: false }, { expert: { scores: [] } });
   const reports = await (await fetch(base + '/api/reports')).json();
-  assert.equal(reports.length, 1); assert.equal(reports[0].day, '2026-10-14');
+  assert.deepEqual(reports.map(r => r.day), ['2026-10-14', '2026-10-15']);
+  assert.equal(reports[0].rules.day, '2026-10-14'); assert.deepEqual(reports[0].expert.expert.scores, []); assert.equal(reports[1].expert, null);
+  const card = await (await fetch(base + '/api/scorecard')).json();
+  assert.equal(card.sessions, 1); assert.equal(card.exitBarMet, false);
 });
 
 test('/api/state has expert.enabled false by default and no expert engine calls', async t => {

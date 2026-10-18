@@ -362,7 +362,7 @@ function openStop(id) {
 }
 async function renderReports() {
   let reports;
-  try { reports = await api('/api/reports'); } catch (error) { replace('reports-body', [node('tr', '', node('td', 'empty-cell', error.message))]); return; }
+  try { reports = (await api('/api/reports')).map(row => row.rules); } catch (error) { replace('reports-body', [node('tr', '', node('td', 'empty-cell', error.message))]); return; }
   text('reports-count', `${reports.length} days`);
   if (!reports.length) { replace('reports-body', [(() => { const row = node('tr', ''); const cell = node('td', 'empty-cell', 'No daily report yet. One is written after each live session closes.'); cell.colSpan = 7; row.append(cell); return row; })()]); return; }
   replace('reports-body', [...reports].reverse().map(r => {

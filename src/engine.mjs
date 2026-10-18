@@ -441,7 +441,7 @@ export class TradingEngine {
     }
   }); }
   // shortcut: fixed costs prorated over 21 trading days a month; use actual invoices if a month's count matters.
-  dailyReport(day, dataQuality = {}) {
+  dailyReport(day, dataQuality = {}, extra = {}) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error('Report day must be YYYY-MM-DD.');
     const s = this.state, sim = s.settings.simulation, perDay = sim.fixedCostsPerMonthInr / 21;
     const liveDays = [...new Set(s.dataset.filter(row => row.source === 'ticks' || row.source === 'thin').map(row => sessionDay(row.timestamp)))].filter(d => d <= day);
@@ -453,7 +453,7 @@ export class TradingEngine {
       tradesToday: s.trades.filter(trade => sessionDay(trade.timestamp) === day),
       benchmarkEquity: m.benchmarkEquity, cappedBenchmarkEquity: m.cappedBenchmarkEquity,
       tradingDays: liveDays.length, fixedCostsToDate, monthToDateFixedCosts, spendCap: sim.spendCapPerMonthInr,
-      netAfterFixedCosts: money(m.equity - sim.startingCapital - fixedCostsToDate), dataQuality: clone(dataQuality) };
+      netAfterFixedCosts: money(m.equity - sim.startingCapital - fixedCostsToDate), dataQuality: clone(dataQuality), ...clone(extra) };
     this.store.saveDailyReport(day, payload);
     return payload;
   }

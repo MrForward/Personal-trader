@@ -445,3 +445,10 @@ test('user tightenStop: lower stop and stops at or above the mark throw the exis
   for (const stopPrice of [mark, mark + 1]) assert.throws(() => engine.tightenStop('held-position', { stopPrice }), /Stop must be positive and below the current mark price\./);
   assert.equal(engine.state.positions[0].stopPrice, 100); assert.equal(engine.state.positions[0].stopRevisions, undefined);
 });
+
+test('dailyReport merges extra fields', t => {
+  const { engine, store } = fixture(t);
+  const payload = engine.dailyReport('2026-10-14', { flagged: false }, { expert: { scores: [{ decisionId: 'd1' }] } });
+  assert.deepEqual(payload.expert.scores, [{ decisionId: 'd1' }]);
+  assert.deepEqual(store.dailyReports()[0].expert.scores, [{ decisionId: 'd1' }]); assert.equal(engine.dailyReport('2026-10-15').expert, undefined);
+});

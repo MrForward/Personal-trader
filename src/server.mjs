@@ -5,7 +5,7 @@ import { resolve, dirname } from 'node:path';
 import { Store } from './store.mjs';
 import { TradingEngine } from './engine.mjs';
 import { reviewMarket, runClaudeCode } from './models.mjs';
-import { makeDecider, runTheses } from './expert.mjs';
+import { makeDecider, makeScoring, runTheses, scorecard } from './expert.mjs';
 import { researchMarket, researchSymbol } from './research.mjs';
 import { intelligenceContext, makeDemoIntelligence, validateIntelligence } from './intelligence.mjs';
 import { redact } from './secrets.mjs';
@@ -101,6 +101,7 @@ export function createApplication({
   };
   const theses = ({ symbols, day, asOf, state }) => runTheses({ store: expertStore, settings: expertEngine.state.settings, symbols, day, asOf, state, runner: modelRunner,
     intelligenceFor: (symbol, at) => expertIntelligence({ symbol, asOf: at }) });
+  const scoring = makeScoring({ expertEngine, rulesEngine: engine, runner: modelRunner });
   // One writer: requests and replay ticks cannot race settings, state or the cursor.
   let queue = Promise.resolve();
   const serial = operation => {
@@ -114,8 +115,7 @@ export function createApplication({
   const runner = kiteSession ? new LiveRunner({ engine, session: kiteSession, run: serial,
     captureDir: captureDir ?? (dbPath === ':memory:' ? resolve(projectRoot, 'data/ticks') : resolve(dirname(dbPath), 'ticks')),
     onFatal: error => { process.stderr.write(`Live runner stopped: ${redact(error.message)}\n`); process.exitCode = 1; void app?.close(); },
-    // shortcut: scoring is the expert book's daily report until Task 7 adds the scorecard.
-    expert: expertOn ? { engine: expertEngine, decider, research, theses, scoring: (day, dataQuality) => expertEngine.dailyReport(day, dataQuality) } : null, ...liveOptions }) : null;
+    expert: expertOn ? { engine: expertEngine, decider, research, theses, scoring } : null, ...liveOptions }) : null;
   const kiteStatus = () => kiteSession ? { configured: true, session: kiteSession.status(), runner: runner.status() } : { configured: false };
   const snapshot = () => {
     const value = engine.snapshot();
@@ -128,6 +128,10 @@ export function createApplication({
     const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
     value.expert = { enabled: expertOn, book: expertEngine.snapshot(), theses: expertStore.thesesFor(today), runner: runner?.status().expert ?? null };
     return value;
+  };
+  const reports = () => {
+    const expertByDay = new Map(expertStore.dailyReports().map(report => [report.day, report]));
+    return store.dailyReports().map(rules => ({ day: rules.day, rules, expert: expertByDay.get(rules.day) ?? null }));
   };
   let closing = false;
   const json = (res, status, value) => {
@@ -160,7 +164,8 @@ export function createApplication({
       if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, { ok: true, mode: engine.state.mode, liveTrading: false, paidModelCallsEnabled: allowPaidModelCalls,
         networkNewsConnected: false, kite: kiteSession?.status().state ?? 'unconfigured', lastTickAt: runner?.status().lastTickAt ?? null });
       if (req.method === 'GET' && url.pathname === '/api/kite/status') return json(res, 200, kiteStatus());
-      if (req.method === 'GET' && url.pathname === '/api/reports') return json(res, 200, await serial(() => store.dailyReports()));
+      if (req.method === 'GET' && url.pathname === '/api/reports') return json(res, 200, await serial(reports));
+      if (req.method === 'GET' && url.pathname === '/api/scorecard') return json(res, 200, await serial(() => scorecard({ reports: reports() })));
       if (req.method === 'GET' && kiteSession && url.pathname === '/kite/login') { res.writeHead(302, { location: kiteSession.loginUrl() }); res.end(); return; }
       if (req.method === 'GET' && kiteSession && url.pathname === '/kite/callback') {
         // Kite redirects here cross-site by design; the one-time request token from the owner's login is the authority.
