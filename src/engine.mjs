@@ -5,6 +5,7 @@ import { makeDemoSeries, DEMO_ASSETS } from './demo-data.mjs';
 import { reviewMarket, providerStatus } from './models.mjs';
 import { validateDataset, parseCsv, validateBar } from './dataset.mjs';
 import { charges, perShareRate } from './costs.mjs';
+import { redact } from './secrets.mjs';
 
 const money = n => Math.round(n * 100) / 100;
 const clone = value => structuredClone(value);
@@ -66,9 +67,7 @@ function checkRisk(state, row, field = 'close') {
 }
 const storageFailure = error => ['PERSISTENCE_ERROR', 'STALE_STATE'].includes(error?.code);
 function safeMessage(error) {
-  let message = error instanceof Error ? error.message : 'Model review failed.';
-  for (const secret of [process.env.OPENAI_API_KEY, process.env.ANTHROPIC_API_KEY].filter(Boolean)) message = message.split(secret).join('[redacted]');
-  return message.slice(0, 1000);
+  return redact(error instanceof Error ? error.message : 'Model review failed.').slice(0, 1000);
 }
 
 export class TradingEngine {
@@ -77,6 +76,8 @@ export class TradingEngine {
     this.state = store.load() ?? newState(DEFAULT_SETTINGS, makeDemoSeries(), DEMO_ASSETS, 'synthetic demo');
     // Compatible with paused draft state: new fields are explicit paper defaults.
     this.state.settings.risk.maxDailyLossPct ??= DEFAULT_SETTINGS.risk.maxDailyLossPct;
+    this.state.settings.universe ??= DEFAULT_SETTINGS.universe; this.state.settings.barMinutes ??= DEFAULT_SETTINGS.barMinutes;
+    this.state.settings.simulation.costSchedule ??= DEFAULT_SETTINGS.simulation.costSchedule; delete this.state.settings.simulation.feeBps;
     this.state.cappedBenchmark ??= benchmark(this.state.settings.simulation.startingCapital, true);
     this.state.riskLatched ??= this.state.status === 'risk-paused';
     this.state.sessionDay ??= sessionDay(this.state.dataset[this.state.cursor].timestamp);
@@ -146,6 +147,7 @@ export class TradingEngine {
     if (this.state.persistenceFault) throw new Error('Reload or reset after the storage failure before changing settings.');
     const nextSettings = validateSettings(input, this.state.settings);
     const next = clone(this.state);
+    if ((JSON.stringify(nextSettings.universe) !== JSON.stringify(next.settings.universe) || nextSettings.barMinutes !== next.settings.barMinutes) && next.positions.length) throw new Error('Close open positions before changing the universe or bar size.');
     if (nextSettings.simulation.startingCapital !== next.settings.simulation.startingCapital) {
       if (next.cursor > INITIAL_CURSOR || next.trades.length || next.positions.length) throw new Error('Reset the paper run before changing starting capital.');
       const fresh = newState(nextSettings, next.dataset, next.assets, next.dataSource, next.intelligenceRecords);

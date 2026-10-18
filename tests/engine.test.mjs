@@ -253,3 +253,9 @@ test('blockEntries rejects buys with the given reason', async t => {
   assert.equal(engine.state.decisions[0].outcome, 'Rejected: Data gap: waiting for clean bars');
   await assert.rejects(() => liveStep(engine, { blockEntries: 5 }), /Invalid replay step identity/);
 });
+
+test('universe cannot change while a position is open', t => {
+  const { engine } = fixture(t); seed(engine);
+  assert.throws(() => engine.settings({ universe: ['INFY'] }), /Close open positions/);
+  assert.throws(() => engine.settings({ barMinutes: 60 }), /Close open positions/);
+});

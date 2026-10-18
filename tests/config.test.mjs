@@ -26,3 +26,10 @@ test('cost schedule is validated and defaults to the Zerodha CNC schedule', () =
   assert.throws(() => validateSettings({ simulation: { costSchedule: 'x' } }), /costSchedule/);
   assert.throws(() => validateSettings({ simulation: { feeBps: 10 } }), /Unknown simulation setting/);
 });
+test('universe and bar size are validated', () => {
+  assert.equal(DEFAULT_SETTINGS.universe.length, 10); assert.equal(DEFAULT_SETTINGS.barMinutes, 15);
+  assert.deepEqual(validateSettings({ universe: ['INFY', 'ITC', 'INFY'] }).universe, ['INFY', 'ITC']);
+  assert.equal(validateSettings({ barMinutes: 60 }).barMinutes, 60);
+  for (const bad of [{ universe: [] }, { universe: ['bad symbol'] }, { universe: Array.from({ length: 21 }, (_, i) => `S${i}`) }, { universe: 'INFY' }, { barMinutes: 7 }])
+    assert.throws(() => validateSettings(bad), /universe|barMinutes/);
+});

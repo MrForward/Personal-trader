@@ -6,6 +6,7 @@ import { Store } from './store.mjs';
 import { TradingEngine } from './engine.mjs';
 import { reviewMarket } from './models.mjs';
 import { intelligenceContext, makeDemoIntelligence, validateIntelligence } from './intelligence.mjs';
+import { redact } from './secrets.mjs';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const assets = new Map([
@@ -18,9 +19,7 @@ const loopbackNames = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 const MAX_BODY = 4 * 1024 * 1024;
 
 function publicError(error) {
-  let message = error?.message || 'The requested operation failed.';
-  for (const secret of [process.env.OPENAI_API_KEY, process.env.ANTHROPIC_API_KEY].filter(Boolean)) message = message.replaceAll(secret, '[redacted]');
-  return message.slice(0, 1000);
+  return redact(error?.message || 'The requested operation failed.').slice(0, 1000);
 }
 
 async function jsonBody(req) {

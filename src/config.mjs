@@ -7,7 +7,11 @@ export const DEFAULT_SETTINGS = {
   strategy: { mode: 'auto', enabled: ['momentum', 'mean_reversion'] },
   risk: { stopLossPct: 2, takeProfitPct: 4, trailingStopPct: 0, maxPositionPct: 25, maxExposurePct: 60, maxDrawdownPct: 8, maxDailyLossPct: 3, riskPerTradePct: 0.5 },
   simulation: { startingCapital: 9000, slippageBps: 10, costSchedule: 'zerodha-cnc-2026-10' },
+  // shortcut: placeholder universe of liquid NSE names, replace when the owner confirms the list (GOAL.md: under ₹1,500/share).
+  universe: ['RELIANCE', 'INFY', 'HDFCBANK', 'ICICIBANK', 'ITC', 'SBIN', 'WIPRO', 'ONGC', 'COALINDIA', 'TATASTEEL'],
+  barMinutes: 15,
 };
+const SYMBOL = /^[A-Z0-9][A-Z0-9._&-]{0,24}$/;
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value)
   && [Object.prototype, null].includes(Object.getPrototypeOf(value));
@@ -25,7 +29,7 @@ const bounds = {
 
 export function validateSettings(input, previous = DEFAULT_SETTINGS) {
   if (!object(input)) throw new Error('Settings must be an object.');
-  for (const key of Object.keys(input)) if (!['model', 'strategy', 'risk', 'simulation', 'version'].includes(key)) throw new Error(`Unknown setting: ${key}`);
+  for (const key of Object.keys(input)) if (!['model', 'strategy', 'risk', 'simulation', 'universe', 'barMinutes', 'version'].includes(key)) throw new Error(`Unknown setting: ${key}`);
   for (const [group, allowed] of Object.entries(groups)) {
     if (!Object.hasOwn(input, group)) continue;
     if (!object(input[group])) throw new Error(`${group} settings must be an object.`);
@@ -54,5 +58,9 @@ export function validateSettings(input, previous = DEFAULT_SETTINGS) {
   }
   simulation.costSchedule = input.simulation?.costSchedule ?? previous.simulation.costSchedule;
   if (!COST_SCHEDULES.includes(simulation.costSchedule)) throw new Error(`costSchedule must be one of: ${COST_SCHEDULES.join(', ')}.`);
-  return { version: previous.version + 1, model, strategy, risk, simulation };
+  const universe = input.universe ?? previous.universe;
+  if (!Array.isArray(universe) || !universe.length || universe.length > 20 || universe.some(symbol => typeof symbol !== 'string' || !SYMBOL.test(symbol))) throw new Error('universe must list 1–20 NSE trading symbols.');
+  const barMinutes = input.barMinutes ?? previous.barMinutes;
+  if (![5, 15, 60].includes(barMinutes)) throw new Error('barMinutes must be 5, 15 or 60.');
+  return { version: previous.version + 1, model, strategy, risk, simulation, universe: [...new Set(universe)], barMinutes };
 }
