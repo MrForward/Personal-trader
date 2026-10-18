@@ -259,3 +259,17 @@ test('universe cannot change while a position is open', t => {
   assert.throws(() => engine.settings({ universe: ['INFY'] }), /Close open positions/);
   assert.throws(() => engine.settings({ barMinutes: 60 }), /Close open positions/);
 });
+
+test('catchUp fast-forwards over missed bars without decisions; the next open applies gap stops', async t => {
+  const { engine } = fixture(t);
+  engine.beginLive({ rows: rows(['A'], 40), assets: liveAssets, source: 'test live' });
+  seed(engine, { stopPrice: 135 });
+  const at = i => new Date(Date.UTC(2020, 0, 1, 9, i * 5)).toISOString();
+  for (const i of [40, 41]) engine.appendBar({ timestamp: at(i), source: 'historical', bars: { A: { open: 150, high: 151, low: 120, close: 150, volume: 1 } } });
+  engine.catchUp();
+  assert.equal(engine.state.cursor, 41); assert.equal(engine.state.decisions.length, 0); assert.equal(engine.state.positions.length, 1);
+  assert.ok(engine.store.audit().some(row => row.kind === 'catch-up' && row.payload.skipped === 2));
+  engine.appendBar({ timestamp: at(42), source: 'ticks', bars: { A: { open: 130, high: 131, low: 129, close: 130, volume: 1 } } });
+  await liveStep(engine);
+  assert.equal(engine.state.positions.length, 0); assert.equal(engine.state.trades.at(-1).reason, 'Gap protective stop'); assert.equal(engine.state.trades.at(-1).price, 130);
+});

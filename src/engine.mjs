@@ -204,6 +204,17 @@ export class TradingEngine {
     next.dataset.push({ timestamp, closed: true, source: BAR_SOURCES.has(row.source) ? row.source : 'assumed', bars });
     return this.commit(next, 'bar-append', { timestamp, source: next.dataset.at(-1).source, total: next.dataset.length });
   }); }
+  catchUp() { return this.exclusive(() => {
+    if (this.state.persistenceFault) throw new Error('Reload or reset after the storage failure.');
+    const skipped = this.state.dataset.length - 1 - this.state.cursor;
+    if (skipped <= 0) return { ...this.snapshot(), busy: false };
+    const next = clone(this.state), previous = next.dataset[next.cursor], latest = next.dataset.at(-1);
+    const day = sessionDay(latest.timestamp);
+    if (day !== next.sessionDay) { next.sessionDay = day; next.sessionStartingEquity = mark(next, previous).equity; }
+    next.cursor = next.dataset.length - 1;
+    // No decisions on bars nobody watched; held positions meet their stops at the next observed open.
+    return this.commit(next, 'catch-up', { skipped, from: previous.timestamp, to: latest.timestamp, positions: next.positions.map(p => p.symbol) });
+  }); }
   setIntelligence(records) { return this.exclusive(() => {
     if (!Array.isArray(records)) throw new Error('Intelligence records must be a validated array.');
     if (this.state.persistenceFault) throw new Error('Reload or reset after the storage failure.');
