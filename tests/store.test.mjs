@@ -67,4 +67,8 @@ test('lastDecision returns the newest decision output before a time, skipping th
   assert.equal(s.lastDecision('INFY').key, 'b'); assert.deepEqual(s.lastDecision('INFY').response, { action: 'hold' });
   assert.equal(s.lastDecision('INFY', '2026-10-15T04:00:00.000Z').key, 'a');
   assert.equal(s.lastDecision('INFY', '2026-10-14T04:00:00.000Z'), null); assert.equal(s.lastDecision('ITC'), null);
+  s.saveModelOutput({ key: 'f', engine: 'expert', symbol: 'INFY', trigger: 'invalidation', asOf: '2026-10-15T05:00:00.000Z', promptHash: 'h', request: {}, response: { suppressed: 'timed out' } });
+  assert.equal(s.lastDecision('INFY').key, 'b'); // suppressions are not decisions
+  assert.deepEqual(s.decisionTriggers('INFY', '2026-10-15T00:00:00.000Z', '2026-10-16T00:00:00.000Z'), ['stale-review']);
+  assert.deepEqual(s.decisionTriggers('INFY', '2026-10-14T00:00:00.000Z', '2026-10-15T04:00:00.000Z'), ['entry']);
 });

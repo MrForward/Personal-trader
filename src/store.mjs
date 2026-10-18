@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
+const DECISIONS = "symbol=? AND trigger NOT IN ('thesis','review') AND json_extract(response,'$.suppressed') IS NULL";
 const outputRow = row => row ? { ...row, request: JSON.parse(row.request), response: JSON.parse(row.response), usage: JSON.parse(row.usage) } : null;
 function failure(message, code = 'PERSISTENCE_ERROR') { const error = new Error(message); error.code = code; return error; }
 
@@ -126,9 +127,12 @@ export class Store {
       .run(key, engine, symbol, trigger, asOf, promptHash, JSON.stringify(request), JSON.stringify(response), JSON.stringify(usage), costUsd, createdAt);
   }
   modelOutput(key) { return outputRow(this.db.prepare('SELECT * FROM model_outputs WHERE key=?').get(key)); }
-  // Newest decision-call output for a symbol strictly before `before` (an ISO time), so a replay never sees its own future.
+  // Newest decision-call output for a symbol strictly before `before` (an ISO time), so a replay never sees its own future. Recorded suppressions are not decisions.
   lastDecision(symbol, before = '9999') {
-    return outputRow(this.db.prepare("SELECT * FROM model_outputs WHERE symbol=? AND trigger NOT IN ('thesis','review') AND asOf<? ORDER BY asOf DESC LIMIT 1").get(symbol, before));
+    return outputRow(this.db.prepare(`SELECT * FROM model_outputs WHERE ${DECISIONS} AND asOf<? ORDER BY asOf DESC LIMIT 1`).get(symbol, before));
+  }
+  decisionTriggers(symbol, from, before) {
+    return this.db.prepare(`SELECT DISTINCT trigger FROM model_outputs WHERE ${DECISIONS} AND asOf>=? AND asOf<? ORDER BY trigger`).all(symbol, from, before).map(row => row.trigger);
   }
   clearKiteSession() { this.db.prepare('DELETE FROM kite_session WHERE id=1').run(); }
   audit() { return this.db.prepare('SELECT * FROM audit ORDER BY id').all().map(row => ({ ...row, payload: JSON.parse(row.payload) })); }

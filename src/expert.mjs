@@ -131,14 +131,14 @@ export function validateDecision(value, { evidenceIds, position, thesis }) {
   return value;
 }
 
-/** Spec §4 trigger table, evaluated in order. A held position with no earlier decision counts as stale. */
-export function triggerFor({ thesis, position, bar, rulesSignal = false, newEvidenceSince = false, lastDecisionDay = null, day }) {
+/** Spec §4 trigger table, evaluated in order; a condition in `alreadyFired` is skipped so the next one can fire. A held position with no earlier decision counts as stale. */
+export function triggerFor({ thesis, position, bar, rulesSignal = false, newEvidenceSince = false, lastDecisionDay = null, day, alreadyFired = new Set() }) {
   if (!position) {
-    if (thesis?.stance !== 'candidate') return null;
+    if (thesis?.stance !== 'candidate' || alreadyFired.has('entry')) return null;
     const { type, level } = thesis.entryCondition ?? {};
     return (type === 'rulesSignal' ? rulesSignal : type === 'priceAbove' ? bar.close > level : type === 'priceBelow' && bar.close < level) ? 'entry' : null;
   }
-  if (bar.low <= thesis?.invalidation?.priceBelow) return 'invalidation';
+  if (!alreadyFired.has('invalidation') && bar.low <= thesis?.invalidation?.priceBelow) return 'invalidation';
   if (newEvidenceSince) return 'new-evidence';
   if (!lastDecisionDay || sessionsAfter(lastDecisionDay, day) >= 2) return 'stale-review';
   return null;
@@ -153,11 +153,8 @@ function packFor(args) {
 }
 const evidenceMap = pack => new Map([...pack.evidence.claims, ...pack.calendar.events].flatMap(c => [c.recordId, ...(c.recordIds ?? [])].map(id => [id, c.content])));
 
-// Serves a recorded output when present; otherwise reserves a call, runs, validates and records it. Failed calls are never recorded.
-async function callModel({ store, settings, runner, replay, row, model, prompt, schema, request, validate }) {
-  const stored = store.modelOutput(row.key);
-  if (stored) return { value: stored.response, usage: stored.usage, costUsd: stored.costUsd };
-  if (replay) throw codeError(`No recorded model output for ${row.key}.`, 'REPLAY_MISS');
+// Reserves a call, runs, validates; the caller records the outcome.
+async function callModel({ store, settings, runner, model, prompt, schema, request, validate }) {
   let id;
   try { id = store.reserveCall({ provider: 'claude-code', model, dailyCallLimit: settings.model.dailyCallLimit }); }
   catch (error) { throw error.code === 'DAILY_CALL_LIMIT' ? new Error('Daily AI call limit reached') : error; }
@@ -166,8 +163,24 @@ async function callModel({ store, settings, runner, replay, row, model, prompt, 
   catch (error) { store.finishCall(id, 'failed'); throw error; }
   try { value = validate(out.value); } catch (error) { store.finishCall(id, 'failed', out.usage); throw error; }
   store.finishCall(id, 'completed', out.usage);
-  store.saveModelOutput({ ...row, request: { model, ...request }, response: value, usage: out.usage, costUsd: out.costUsd });
-  return { value, usage: out.usage, costUsd: out.costUsd };
+  return { value, usage: out.usage, costUsd: out.costUsd, request: { model, ...request } };
+}
+
+// Replays the recorded outcome for `row.key` (an output, or a suppression rethrown with its message); live, runs `live` and records whichever it was.
+async function recorded({ store, row, replay, live }) {
+  const stored = store.modelOutput(row.key);
+  if (stored?.response.suppressed) throw new Error(stored.response.suppressed);
+  if (stored) return { value: stored.response, usage: stored.usage, costUsd: stored.costUsd, request: stored.request };
+  if (replay) throw codeError(`No recorded model output for ${row.key}.`, 'REPLAY_MISS');
+  let out;
+  try { out = await live(); } catch (error) {
+    if (['PERSISTENCE_ERROR', 'STALE_STATE'].includes(error.code)) throw error;
+    const message = redact(error.message).slice(0, 1000);
+    store.saveModelOutput({ ...row, request: {}, response: { suppressed: message } });
+    throw codeError(message, error.code);
+  }
+  store.saveModelOutput({ ...row, request: out.request, response: out.value, usage: out.usage, costUsd: out.costUsd });
+  return out;
 }
 
 /** The engine's decider for the expert book. Never mutates `state` or `context`; a rejection becomes a suppressed HOLD in the engine. */
@@ -176,31 +189,32 @@ export function makeDecider({ store, engineName = 'expert', settings, runner = r
   const decider = async ({ symbol, state, context }) => {
     const row = state.dataset[state.cursor], asOf = new Date(row.timestamp).toISOString(), day = istDay.format(Date.parse(asOf));
     let thesis = store.thesis(symbol, day);
+    if (Date.parse(thesis?.createdAt) > Date.parse(asOf)) thesis = null; // not yet written at this bar
     if (thesis && Date.parse(thesis.expiresAt) < Date.parse(asOf)) thesis = { ...thesis, stance: 'watch' }; // expired reverts to watch
     const position = state.positions.find(p => p.symbol === symbol) ?? null;
     const rulesSignal = context.rulesChoice !== 'none' && context.candidates.some(c => c.strategyId === context.rulesChoice && c.action === 'BUY');
     const last = store.lastDecision(symbol, asOf), lastDay = last && istDay.format(Date.parse(last.asOf));
     const newEvidenceSince = Boolean(last) && (context.intelligence?.claims ?? []).some(c => Date.parse(c.analysisReadyAt) > Date.parse(last.asOf));
-    const fired = triggerFor({ thesis, position, bar: row.bars[symbol], rulesSignal, newEvidenceSince, lastDecisionDay: lastDay, day });
     // Entry and invalidation conditions persist across bars; each fires once per session day (spec §10).
-    const trigger = ['entry', 'invalidation'].includes(fired) && last?.trigger === fired && lastDay === day ? null : fired;
+    const alreadyFired = new Set(store.decisionTriggers(symbol, new Date(`${day}T00:00:00+05:30`).toISOString(), asOf));
+    const trigger = triggerFor({ thesis, position, bar: row.bars[symbol], rulesSignal, newEvidenceSince, lastDecisionDay: lastDay, day, alreadyFired });
     if (!trigger) return { action: 'abstain', reason: 'No trigger', evidence: [], counterEvidence: [], tightenStopTo: null, trigger: null, record: null };
 
-    const pack = packFor({ symbol, asOf, state, daily: dailyFor(day), intelligence: context.intelligence, memory: store.memoryFor(symbol, asOf), thesis,
-      callsRemaining: settings.model.dailyCallLimit - store.callCount() });
-    const ids = evidenceMap(pack), key = [engineName, symbol, trigger, asOf, prompt.hash].join('|');
-    if (!replay && now() < decider.limitUntil) throw new Error(`subscription limit until ${new Date(decider.limitUntil).toISOString()}`);
-    let out;
-    try {
-      out = await callModel({ store, settings, runner, replay, prompt, schema: DECISION_SCHEMA, model: settings.expert.decisionModel,
-        row: { key, engine: engineName, symbol, trigger, asOf, promptHash: prompt.hash }, request: { trigger, contextPack: pack },
-        validate: value => validateDecision(value, { evidenceIds: [...ids.keys()], position, thesis }) });
-    } catch (error) {
-      if (error.code !== 'MODEL_LIMIT') throw error;
-      decider.limitUntil = Date.parse(error.resetAt) || now() + LIMIT_FALLBACK_MS;
-      throw new Error(`subscription limit until ${new Date(decider.limitUntil).toISOString()}`);
-    }
-    const decision = out.value;
+    const key = [engineName, symbol, trigger, asOf, prompt.hash].join('|');
+    const out = await recorded({ store, replay, row: { key, engine: engineName, symbol, trigger, asOf, promptHash: prompt.hash }, live: async () => {
+      if (now() < decider.limitUntil) throw new Error(`subscription limit until ${new Date(decider.limitUntil).toISOString()}`);
+      const pack = packFor({ symbol, asOf, state, daily: dailyFor(day), intelligence: context.intelligence, memory: store.memoryFor(symbol, asOf), thesis,
+        callsRemaining: settings.model.dailyCallLimit - store.callCount() });
+      try {
+        return await callModel({ store, settings, runner, prompt, schema: DECISION_SCHEMA, model: settings.expert.decisionModel, request: { trigger, contextPack: pack },
+          validate: value => validateDecision(value, { evidenceIds: [...evidenceMap(pack).keys()], position, thesis }) });
+      } catch (error) {
+        if (error.code !== 'MODEL_LIMIT') throw error;
+        decider.limitUntil = Date.parse(error.resetAt) || now() + LIMIT_FALLBACK_MS;
+        throw new Error(`subscription limit until ${new Date(decider.limitUntil).toISOString()}`);
+      }
+    } });
+    const decision = out.value, ids = evidenceMap(out.request.contextPack);
     return { action: decision.action, reason: decision.reason, evidence: decision.evidenceIds.map(id => `${id}: ${ids.get(id)}`), counterEvidence: [...decision.counterEvidence],
       tightenStopTo: position ? decision.tightenStopTo : null, trigger, record: { ...decision, key, usage: out.usage, costUsd: out.costUsd } };
   };
@@ -208,7 +222,7 @@ export function makeDecider({ store, engineName = 'expert', settings, runner = r
   return decider;
 }
 
-/** Pre-open pass: one thesis call per symbol without a stored thesis for `day`. Failures store a `watch` placeholder, so the pass is idempotent per day. */
+/** Pre-open pass: one thesis call per symbol without a stored thesis for `day`. Failures store a `watch` placeholder (and record it for replay), so the pass is idempotent per day. */
 export async function runTheses({ store, settings, symbols, day, asOf, runner = runClaudeCode, intelligenceFor, dailyFor = d => store.dailyFor(d), state, replay = false, engineName = 'expert', promptDir = PROMPT_DIR }) {
   const prompt = loadPrompt(promptDir, 'thesis', THESIS_SCHEMA);
   asOf = new Date(asOf).toISOString();
@@ -216,20 +230,24 @@ export async function runTheses({ store, settings, symbols, day, asOf, runner = 
   let limited = false;
   for (const symbol of symbols) {
     if (store.thesis(symbol, day)) continue;
-    const save = payload => store.saveThesis(symbol, day, { ...payload, createdAt: asOf });
-    if (limited) { save({ stance: 'watch', invalid: 'subscription limit' }); continue; }
+    const row = { key: [engineName, symbol, 'thesis', asOf, prompt.hash].join('|'), engine: engineName, symbol, trigger: 'thesis', asOf, promptHash: prompt.hash };
+    let payload;
     try {
-      const pack = packFor({ symbol, asOf, state, daily: dailyFor(day), intelligence: intelligenceFor(symbol, asOf), memory: store.memoryFor(symbol, asOf),
-        callsRemaining: settings.model.dailyCallLimit - store.callCount() });
-      const ids = [...evidenceMap(pack).keys()];
-      const { value } = await callModel({ store, settings, runner, replay, prompt, schema: THESIS_SCHEMA, model: settings.expert.thesisModel,
-        row: { key: [engineName, symbol, 'thesis', asOf, prompt.hash].join('|'), engine: engineName, symbol, trigger: 'thesis', asOf, promptHash: prompt.hash },
-        request: { contextPack: pack }, validate: value => validateThesis(value, { evidenceIds: ids, sessionCloseIso }) });
-      save(value);
+      ({ value: payload } = await recorded({ store, replay, row, live: async () => {
+        if (limited) throw codeError('subscription limit', 'MODEL_LIMIT');
+        const pack = packFor({ symbol, asOf, state, daily: dailyFor(day), intelligence: intelligenceFor(symbol, asOf), memory: store.memoryFor(symbol, asOf),
+          callsRemaining: settings.model.dailyCallLimit - store.callCount() });
+        const ids = [...evidenceMap(pack).keys()];
+        try {
+          return await callModel({ store, settings, runner, prompt, schema: THESIS_SCHEMA, model: settings.expert.thesisModel,
+            request: { contextPack: pack }, validate: value => validateThesis(value, { evidenceIds: ids, sessionCloseIso }) });
+        } catch (error) { throw error.code === 'MODEL_LIMIT' ? codeError('subscription limit', 'MODEL_LIMIT') : error; }
+      } }));
     } catch (error) {
       if (['REPLAY_MISS', 'PERSISTENCE_ERROR', 'STALE_STATE'].includes(error.code)) throw error;
-      limited = error.code === 'MODEL_LIMIT';
-      save({ stance: 'watch', invalid: limited ? 'subscription limit' : redact(error.message).slice(0, 300) });
+      limited ||= error.code === 'MODEL_LIMIT';
+      payload = { stance: 'watch', invalid: error.message.slice(0, 300) };
     }
+    store.saveThesis(symbol, day, { ...payload, createdAt: asOf });
   }
 }

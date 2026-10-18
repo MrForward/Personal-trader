@@ -331,7 +331,8 @@ export class TradingEngine {
     let result;
     try { result = await this.decider({ symbol: asset.symbol, state: s, context: captured }); }
     catch (error) {
-      if (storageFailure(error)) throw error;
+      // A replay miss must stop the replay, not become a suppression the live run never had.
+      if (storageFailure(error) || error?.code === 'REPLAY_MISS') throw error;
       const message = safeMessage(error);
       return hold(`Expert unavailable: ${message}. No new trade.`, `Suppressed: ${message}`);
     }

@@ -121,6 +121,8 @@ test('triggerFor order and conditions', () => {
   assert.equal(triggerFor({ thesis: th, position, bar: { low: 101 }, newEvidenceSince: false, lastDecisionDay: '2026-10-14', day: '2026-10-16' }), 'stale-review');
   assert.equal(triggerFor({ thesis: th, position, bar: { low: 101 }, newEvidenceSince: false, lastDecisionDay: '2026-10-15', day: '2026-10-16' }), null);
   assert.equal(triggerFor({ thesis: th, position, bar: { low: 101 }, newEvidenceSince: false, lastDecisionDay: '2026-10-16', day: '2026-10-21' }), 'stale-review'); // 19 and 21; 20 is a holiday
+  assert.equal(triggerFor({ thesis: th, position, bar: { low: 99 }, newEvidenceSince: true, alreadyFired: new Set(['invalidation']) }), 'new-evidence');
+  assert.equal(triggerFor({ thesis: { stance: 'candidate', entryCondition: { type: 'rulesSignal' } }, position: null, rulesSignal: true, bar, alreadyFired: new Set(['entry']) }), null);
 });
 
 test('decider makes no call without a trigger', async t => {
@@ -170,7 +172,8 @@ test('decider suppresses calls until limitUntil after MODEL_LIMIT', async t => {
   await assert.rejects(h.run(buyContext(), { ...h.state, cursor: dataset.length - 2 }), /subscription limit until/);
   assert.equal(calls, 1); assert.equal(h.store.lastDecision('DEMO1'), null);
   now = Date.parse(resetAt) + 1;
-  await assert.rejects(h.run(), /subscription limit until/); assert.equal(calls, 2);
+  await assert.rejects(h.run(), /subscription limit until/); assert.equal(calls, 1); // this bar's suppression is recorded
+  await assert.rejects(h.run(buyContext(), { ...h.state, cursor: dataset.length - 3 }), /subscription limit until/); assert.equal(calls, 2);
   const unknown = harness(t, { runner: async () => { throw Object.assign(new Error('limit'), { code: 'MODEL_LIMIT', resetAt: null }); } });
   await assert.rejects(unknown.run(), /subscription limit until 2026-10-14T11:05:00.000Z/); // null reset waits 60 minutes
 });
@@ -246,4 +249,51 @@ test('runTheses stops the pass at a subscription limit and suppresses at the cal
   assert.deepEqual(store.thesis('DEMO3', day), { stance: 'watch', invalid: 'Daily AI call limit reached', createdAt: thesisAsOf });
   await runTheses({ ...base, symbols: ['DEMO4'], intelligenceFor: () => ({ claims: [claim('big', '2026-10-14T03:00:00Z')].map(c => ({ ...c, content: 'x'.repeat(70000) })) }), runner: () => assert.fail('runner called on an oversize pack') });
   assert.deepEqual(store.thesis('DEMO4', day), { stance: 'watch', invalid: 'Context pack too large', createdAt: thesisAsOf });
+});
+
+// Bar index for an IST time on 14 Oct in the 15-minute fixture (bar ending 09:30 is index 25).
+const at = hhmm => 25 + (Date.parse(`2026-10-14T${hhmm}:00+05:30`) - Date.parse('2026-10-14T09:30:00+05:30')) / 900_000;
+
+test('a deduped invalidation still lets new evidence through on a held position', async t => {
+  const hold = { ...goodDecision, action: 'hold', invalidation: { priceBelow: 115, note: 'unchanged' } };
+  const h = harness(t, { value: hold, positions: [position], thesis: { ...goodThesis, evidenceIds: [], invalidation: { priceBelow: 115, note: 'every bar touches' }, createdAt: '2026-10-14T03:15:00.000Z' } });
+  const bar = hhmm => ({ ...h.state, cursor: at(hhmm) });
+  assert.equal((await h.run(buyContext(), bar('10:00'))).trigger, 'invalidation');
+  assert.equal((await h.run(buyContext(), bar('10:30'))).trigger, null); // still below, already reviewed today
+  const news = [claim('early', '2026-10-14T03:00:00Z'), claim('late', '2026-10-14T05:15:00Z')]; // ready 10:45 IST
+  assert.equal((await h.run(buyContext(news), bar('11:00'))).trigger, 'new-evidence');
+  assert.equal((await h.run(buyContext(news), bar('11:15'))).trigger, null); assert.equal(h.calls.length, 2);
+});
+
+test('a thesis created after asOf drives no trigger', async t => {
+  const h = harness(t, { thesis: { ...goodThesis, evidenceIds: [], createdAt: '2026-10-14T05:30:00.000Z' } }); // 11:00 IST
+  assert.equal((await h.run(buyContext(), { ...h.state, cursor: at('09:45') })).trigger, null);
+  assert.equal((await h.run(buyContext(), { ...h.state, cursor: at('11:00') })).trigger, 'entry'); assert.equal(h.calls.length, 1);
+});
+
+test('a live day with a timeout replays identically with no runner calls', async t => {
+  let calls = 0;
+  const runner = async () => { if (calls++ === 0) throw Object.assign(new Error('claude -p timed out.'), { code: 'MODEL_TIMEOUT' }); return { value: goodDecision, usage: { inputTokens: 10, outputTokens: 5 }, costUsd: 0.01 }; };
+  const h = harness(t, { runner });
+  const outcome = promise => promise.then(value => ({ value }), error => ({ error: String(error) }));
+  const bars = [at('15:00'), at('15:15'), at('15:30')];
+  const live = [];
+  for (const cursor of bars) live.push(await outcome(h.run(buyContext(), { ...h.state, cursor })));
+  assert.deepEqual(live.map(r => r.error ?? r.value.trigger), ['Error: claude -p timed out.', 'entry', null]); assert.equal(calls, 2);
+  const replay = makeDecider({ store: h.store, settings: DEFAULT_SETTINGS, runner: () => assert.fail('runner called in replay'), replay: true });
+  const replayed = [];
+  for (const cursor of bars) replayed.push(await outcome(replay({ symbol: 'DEMO1', state: { ...h.state, cursor }, context: buyContext() })));
+  assert.deepEqual(replayed, live); assert.equal(calls, 2);
+});
+
+test('thesis placeholders replay identically', async t => {
+  const store = new Store(':memory:'); t.after(() => store.close());
+  const base = { store, settings: DEFAULT_SETTINGS, day, asOf: '2026-10-14T03:15:00.000Z', symbols: ['DEMO1', 'DEMO2', 'DEMO3'], intelligenceFor: () => ({ claims: [] }), dailyFor: () => ({}), state: fixture.state };
+  let calls = 0;
+  await runTheses({ ...base, runner: async () => { calls++; throw Object.assign(new Error(calls === 1 ? 'claude -p timed out.' : 'limit'), { code: calls === 1 ? 'MODEL_TIMEOUT' : 'MODEL_LIMIT', resetAt: null }); } });
+  const live = store.thesesFor(day);
+  assert.deepEqual(Object.values(live).map(th => th.invalid), ['claude -p timed out.', 'subscription limit', 'subscription limit']); assert.equal(calls, 2);
+  store.db.exec('DELETE FROM expert_thesis');
+  await runTheses({ ...base, replay: true, runner: () => assert.fail('runner called in replay') });
+  assert.deepEqual(store.thesesFor(day), live);
 });

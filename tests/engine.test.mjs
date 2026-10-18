@@ -406,6 +406,13 @@ test('storage failures from the decider still abort the step', async t => {
   assert.equal(engine.state.cursor, cursor); assert.equal(engine.state.persistenceFault, true);
 });
 
+test('a REPLAY_MISS from the decider aborts the step without committing or faulting', async t => {
+  const engine = expertEngine(t, () => { throw Object.assign(new Error('No recorded model output for k.'), { code: 'REPLAY_MISS' }); });
+  const before = JSON.stringify(engine.state);
+  await assert.rejects(step(engine), error => error.code === 'REPLAY_MISS');
+  assert.equal(JSON.stringify(engine.state), before); assert.equal(engine.state.persistenceFault, undefined); assert.notEqual(engine.state.status, 'error-paused');
+});
+
 test('blocked entries are not offered to the decider; held positions still are', async t => {
   const seen = [];
   const engine = expertEngine(t, ({ symbol }) => { seen.push(symbol); return { action: 'enter', record: {} }; }, { dataset: rows(['A', 'B']) });
