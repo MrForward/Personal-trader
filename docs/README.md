@@ -7,7 +7,9 @@
 | [Goal](GOAL.md) | One-page statement of what the bot is for, the phases, hard constraints and owner decisions. Read first. |
 | [Phase 1 design](superpowers/specs/2026-10-17-phase1-live-paper-design.md) | Prospective paper trading on live Kite data from a VPS: what to buy, architecture, daily login, costs, tests. |
 | [Phase 1 plan](superpowers/plans/2026-10-17-phase1-live-paper.md) | Task-by-task implementation plan for the Phase 1 design. |
-| [Phase 1b design](superpowers/specs/2026-10-18-phase1b-ai-shadow-design.md) | AI shadow mode: Claude picks a strategy on signal bars in a separate paper ledger; spend cap, failure isolation, comparison report. |
+| [Phase 1b expert shadow design](superpowers/specs/2026-10-18-phase1b-expert-shadow-design.md) | Second paper book decided by Claude (via the Claude Max subscription) with research, theses, reviews and memory; shipped in PR #2. |
+| [Phase 1b expert shadow plan](superpowers/plans/2026-10-18-phase1b-expert-shadow.md) | Task-by-task plan for the expert shadow. |
+| [Phase 1b AI-shadow design (superseded)](superpowers/specs/2026-10-18-phase1b-ai-shadow-design.md) | Not built; replaced by the expert shadow design. |
 | [PRFAQ](PRFAQ.md) | Intended experience, proposed future announcement and product/model/risk/cost FAQs. |
 | [PRD](PRD.md) | Scope, scenarios, requirements, acceptance criteria, evaluation and staged rollout. |
 | [ESOD — Engineering Statement of Direction](ESOD.md) | Architecture, permission boundaries, tradeoffs and dependencies. |
