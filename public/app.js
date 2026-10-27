@@ -211,14 +211,14 @@ function renderChart() {
   svg.append(svgNode('title', { id: 'chart-title' }, 'Paper portfolio equity and full buy-and-hold benchmark'), svgNode('desc', { id: 'chart-desc' }, `${rows.length} recorded observations, from ${date(rows[0].timestamp)} to ${date(rows.at(-1).timestamp)}. Portfolio ended at ${money(rows.at(-1).equity)}; full buy-and-hold benchmark at ${money(rows.at(-1).benchmarkEquity)}. The benchmark has different exposure and does not dynamically match strategy risk. Full values are available in the chart data table.`));
   for (let i = 0; i < 5; i++) {
     const value = high - (high - low) * i / 4, py = y(value);
-    svg.append(svgNode('line', { x1: left, x2: width - right, y1: py, y2: py, stroke: '#2a3743', 'stroke-width': 1 }), svgNode('text', { x: left - 10, y: py + 4, fill: '#a3b1bc', 'font-size': 11, 'text-anchor': 'end', 'font-family': 'monospace' }, new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(value)));
+    svg.append(svgNode('line', { x1: left, x2: width - right, y1: py, y2: py, stroke: '#2a2a2a', 'stroke-width': 1 }), svgNode('text', { x: left - 10, y: py + 4, fill: '#9b9b98', 'font-size': 11, 'text-anchor': 'end', 'font-family': 'monospace' }, new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(value)));
   }
   const points = key => rows.map((row, i) => `${x(i).toFixed(2)},${y(row[key]).toFixed(2)}`).join(' ');
-  svg.append(svgNode('polygon', { points: `${x(0)},${height - bottom} ${points('equity')} ${x(rows.length - 1)},${height - bottom}`, fill: '#8fdbc2', 'fill-opacity': .045 }));
-  svg.append(svgNode('polyline', { points: points('benchmarkEquity'), fill: 'none', stroke: '#93a5b8', 'stroke-width': 2, 'stroke-dasharray': '5 6', 'vector-effect': 'non-scaling-stroke' }));
-  svg.append(svgNode('polyline', { points: points('equity'), fill: 'none', stroke: '#8fdbc2', 'stroke-width': 2.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke' }));
-  svg.append(svgNode('circle', { cx: x(rows.length - 1), cy: y(rows.at(-1).equity), r: 4, fill: '#8fdbc2' }));
-  for (const [index, anchor] of [[0, 'start'], [rows.length - 1, 'end']]) svg.append(svgNode('text', { x: x(index), y: height - 8, fill: '#a3b1bc', 'font-size': 11, 'text-anchor': anchor }, date(rows[index].timestamp)));
+  svg.append(svgNode('polygon', { points: `${x(0)},${height - bottom} ${points('equity')} ${x(rows.length - 1)},${height - bottom}`, fill: '#e6e6e3', 'fill-opacity': .045 }));
+  svg.append(svgNode('polyline', { points: points('benchmarkEquity'), fill: 'none', stroke: '#6e6e6b', 'stroke-width': 2, 'stroke-dasharray': '5 6', 'vector-effect': 'non-scaling-stroke' }));
+  svg.append(svgNode('polyline', { points: points('equity'), fill: 'none', stroke: '#e6e6e3', 'stroke-width': 2.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke' }));
+  svg.append(svgNode('circle', { cx: x(rows.length - 1), cy: y(rows.at(-1).equity), r: 4, fill: '#e6e6e3' }));
+  for (const [index, anchor] of [[0, 'start'], [rows.length - 1, 'end']]) svg.append(svgNode('text', { x: x(index), y: height - 8, fill: '#9b9b98', 'font-size': 11, 'text-anchor': anchor }, date(rows[index].timestamp)));
   replace('equity-chart', [svg]);
   replace('chart-data-body', rows.map(row => {
     const tr = node('tr'); tr.append(node('td', '', date(row.timestamp, true)), node('td', 'number', money(row.equity)), node('td', 'number', money(row.benchmarkEquity)), node('td', 'number', money(row.cappedBenchmarkEquity))); return tr;
