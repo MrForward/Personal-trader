@@ -12,7 +12,8 @@ export const DEFAULT_SETTINGS = {
   barMinutes: 15,
   // shortcut: placeholder allow-list, the owner confirms it before research is enabled.
   expert: { enabled: false, thesisModel: 'claude-opus-5-5', decisionModel: 'claude-opus-5-5', researchModel: 'claude-sonnet-5-5', maxResearchPerSession: 5,
-    allowedDomains: ['nseindia.com', 'bseindia.com', 'rbi.org.in', 'sebi.gov.in', 'reuters.com', 'livemint.com', 'business-standard.com', 'economictimes.indiatimes.com'] , maxRiskPerTradePct: 1 },
+    // Reuters, Mint, ET, Moneycontrol and most Indian outlets block Anthropic's crawler, so WebSearch and WebFetch cannot reach them.
+    allowedDomains: ['nseindia.com', 'bseindia.com', 'rbi.org.in', 'sebi.gov.in', 'business-standard.com', 'businesstoday.in', 'zeebiz.com', 'businessworld.in'], maxRiskPerTradePct: 1 },
 };
 const DOMAIN = /^[a-z0-9.-]+\.[a-z]{2,}$/, MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const SYMBOL = /^[A-Z0-9][A-Z0-9._&-]{0,24}$/;
