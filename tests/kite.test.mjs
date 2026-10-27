@@ -6,11 +6,11 @@ import { redact, registerSecret } from '../src/secrets.mjs';
 import { ACCESS_TOKEN, fakeClient, fakeTicker } from './kite-fakes.mjs';
 
 const T = iso => Date.parse(iso);
-function setup(t, { now = T('2026-10-27T04:00:00Z'), client = fakeClient(), ticker = fakeTicker(), universe } = {}) {
+function setup(t, { now = T('2026-10-27T04:00:00Z'), client = fakeClient(), ticker = fakeTicker(), universe = () => ['A', 'B'] } = {}) {
   const store = new Store(':memory:'); t.after(() => store.close());
   const clock = { now };
   const madeTickers = [];
-  const session = new KiteSession({ apiKey: 'key', apiSecret: 'shh-secret-value', store, now: () => clock.now, ...(universe && { universe }),
+  const session = new KiteSession({ apiKey: 'key', apiSecret: 'shh-secret-value', store, now: () => clock.now, universe,
     makeClient: () => client, makeTicker: (apiKey, token) => { madeTickers.push(token); ticker.access_token = token; return ticker; } });
   return { store, session, clock, client, ticker, madeTickers };
 }
@@ -127,30 +127,45 @@ test('historicalBars day interval returns one bar per completed session with IST
   assert.equal((await session.historicalBars({ symbol: 'A', barMinutes: 'day', count: 1, endMs: T('2026-10-14T10:00:00Z') })).at(0).date, '2026-10-14');
 });
 
-test('index bars resolve through one cached instrument lookup and are never stored as subscriptions', async t => {
+test('every NSE token is stored at login; only universe names are subscribed and index bars need no second lookup', async t => {
   let lookups = 0;
   const client = fakeClient({ symbols: ['A', 'B', 'NIFTY 50'], candles: token => [{ date: new Date('2026-10-13T00:00:00+05:30'), open: 1, high: 1, low: 1, close: token, volume: 0 }] });
   const original = client.getInstruments; client.getInstruments = async (...args) => { lookups++; return original(...args); };
   const { session, store, ticker } = setup(t, { client });
   await session.complete('reqtoken123', ['A', 'B']);
-  assert.deepEqual(store.loadKiteSession().instruments, { A: 1, B: 2 }); assert.equal(lookups, 1);
+  assert.deepEqual(store.loadKiteSession().instruments, { A: 1, B: 2, 'NIFTY 50': 3 });
   const args = { symbol: 'NIFTY 50', barMinutes: 'day', count: 5, endMs: T('2026-10-14T05:00:00Z') };
-  assert.equal((await session.historicalBars(args))[0].close, 3); await session.historicalBars(args);
-  assert.equal(lookups, 2);
+  assert.equal((await session.historicalBars(args))[0].close, 3); assert.equal(lookups, 1);
   session.ticker().start({ onTick() {}, onClose() {} }); ticker.emit('connect');
   assert.deepEqual(ticker.subscribed, [1, 2]);
   await assert.rejects(() => session.historicalBars({ ...args, symbol: 'NOPE' }), /No instrument token for NOPE/);
+  assert.deepEqual(session.equities(), ['A', 'B']);
 });
 
-test('a universe symbol missing from the stored map still asks for a new login; only non-universe names use the instrument list', async t => {
+test('a symbol added to the universe after login resolves from the stored map; names that leave are unsubscribed', async t => {
   const client = fakeClient({ symbols: ['A', 'B', 'C', 'NIFTY 50'], candles: token => [{ date: new Date('2026-10-13T00:00:00+05:30'), open: 1, high: 1, low: 1, close: token, volume: 0 }] });
   const universe = ['A', 'B'];
-  const { session } = setup(t, { client, universe: () => universe });
+  const { session, ticker } = setup(t, { client, universe: () => universe });
   await session.complete('reqtoken123', ['A', 'B']);
-  universe.push('C'); // added to the universe after this login
-  const args = { barMinutes: 'day', count: 5, endMs: T('2026-10-14T05:00:00Z') };
-  await assert.rejects(() => session.historicalBars({ ...args, symbol: 'C' }), /No instrument token for C; log in again/);
-  assert.equal((await session.historicalBars({ ...args, symbol: 'NIFTY 50' }))[0].close, 4);
+  const source = session.ticker(), ticks = [];
+  source.start({ onTick: tick => ticks.push(tick), onClose() {} }); ticker.emit('connect');
+  assert.deepEqual(ticker.subscribed, [1, 2]);
+  universe.splice(0, 2, 'B', 'C'); // the morning scan swapped A for C
+  assert.equal((await session.historicalBars({ symbol: 'C', barMinutes: 'day', count: 5, endMs: T('2026-10-14T05:00:00Z') }))[0].close, 3);
+  source.start({ onTick: tick => ticks.push(tick), onClose() {} });
+  assert.deepEqual(ticker.subscribed, [2, 3]); assert.deepEqual(ticker.unsubscribed, [1]); assert.equal(ticker.connects, 1);
+  ticker.emit('ticks', [{ instrument_token: 1, last_price: 5, volume_traded: 1, exchange_timestamp: new Date('2026-10-27T04:00:01Z') }]);
+  assert.deepEqual(ticks, []);
+});
+
+test('quotes are fetched 500 symbols at a time and keyed by symbol', async t => {
+  const symbols = Array.from({ length: 1200 }, (_, i) => `S${i}`);
+  const client = fakeClient({ symbols, quote: symbol => ({ last_price: 10, volume: Number(symbol.slice(1)), average_price: 11 }) });
+  const { session } = setup(t, { client });
+  await session.complete('reqtoken123', []);
+  const quotes = await session.quotes(symbols);
+  assert.deepEqual(client.quoteCalls, [500, 500, 200]);
+  assert.deepEqual(quotes.S7, { price: 10, volume: 7, averagePrice: 11 }); assert.equal(Object.keys(quotes).length, 1200);
 });
 
 test('instrument tokens from the CSV instrument list are stored and subscribed as numbers', async t => {
@@ -169,15 +184,16 @@ test('instrument tokens from the CSV instrument list are stored and subscribed a
   assert.equal(ticks.length, 1);
 });
 
-test('starting again on an open socket re-subscribes the current instruments', async t => {
-  const { session, ticker, client } = setup(t);
+test('starting again on an open socket re-subscribes the current universe', async t => {
+  const universe = ['A'];
+  const { session, ticker } = setup(t, { universe: () => universe });
   await session.complete('reqtoken123', ['A']);
   const source = session.ticker();
   source.start({ onTick: () => {}, onClose: () => {} });
   ticker.emit('connect');
   assert.deepEqual(ticker.subscribed, [1]);
-  // A later login (or a universe change) while the socket stays open: the SDK skips connect(), so no 'connect' event fires.
-  await session.complete('reqtoken456', ['A', 'B']);
+  // A universe change while the socket stays open: the SDK skips connect(), so no 'connect' event fires.
+  universe.push('B');
   source.start({ onTick: () => {}, onClose: () => {} });
   assert.deepEqual(ticker.subscribed, [1, 2]); assert.deepEqual(ticker.mode, ['full', [1, 2]]);
   assert.equal(ticker.connects, 1);

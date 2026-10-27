@@ -481,3 +481,57 @@ test('rules book sizing ignores confidence', async t => {
   await step(engine);
   assert.equal(engine.state.positions[0].riskPct, engine.state.settings.risk.riskPerTradePct);
 });
+
+test('universe may change with a position open as long as the held name stays; bar size still needs a flat book', t => {
+  const { engine } = fixture(t); seed(engine);
+  assert.throws(() => engine.settings({ universe: ['INFY'] }), /Close open positions in A/);
+  assert.throws(() => engine.settings({ barMinutes: 60 }), /Close open positions before changing the bar size/);
+  assert.deepEqual(engine.settings({ universe: ['INFY', 'A'] }).settings.universe, ['INFY', 'A']);
+});
+
+test('relist swaps the watchlist on a live run without resetting the book, keeps held names and merges new history', async t => {
+  const { engine } = fixture(t);
+  engine.beginLive({ rows: rows(['A', 'B'], 40), assets: [...liveAssets, { symbol: 'B', name: 'B', sector: 'Test' }], source: 'test live' });
+  engine.appendBar(bar40('ticks', { A: { open: 140, high: 142, low: 139, close: 141, volume: 1000 }, B: { open: 1, high: 2, low: 1, close: 1, volume: 5 } }));
+  await liveStep(engine); // momentum buys A at the open of bar 40
+  const { runId, cash, trades, positions } = engine.state;
+  assert.equal(positions.length, 1);
+  assert.throws(() => engine.relist({ rows: rows(['C'], 41), universe: ['C'] }), /Close open positions in A/);
+  assert.throws(() => engine.relist({ rows: rows(['C'], 40), universe: ['A', 'C'] }), /do not reach the current bar for C/);
+  // History for C covers every existing bar and one newer closed bar, which joins the dataset.
+  engine.relist({ rows: rows(['A', 'C'], 42), universe: ['A', 'C'] });
+  const s = engine.state;
+  assert.equal(s.runId, runId); assert.equal(s.cash, cash); assert.deepEqual(s.trades, trades); assert.equal(s.positions[0].symbol, 'A');
+  assert.deepEqual(s.assets.map(a => a.symbol), ['A', 'C']); assert.deepEqual(s.settings.universe, ['A', 'C']);
+  assert.equal(s.dataset.length, 42); assert.equal(s.cursor, 41); assert.equal(s.dataset[41].source, 'historical');
+  assert.ok(s.dataset[0].bars.C && !s.dataset[0].bars.B); assert.equal(s.dataset[40].bars.A.open, bar40().bars.A.open);
+  assert.equal(engine.histories('C').length, 42); assert.match(s.configHistory.at(-1).note, /Watchlist scan/);
+  assert.throws(() => engine.appendBar({ ...bar40(), timestamp: new Date(Date.parse(s.dataset[41].timestamp) + 300_000).toISOString() }), /every universe symbol/);
+  const { engine: replay } = fixture(t);
+  assert.throws(() => replay.relist({ rows: rows(['A'], 40), universe: ['A'] }), /only to a live run/);
+});
+
+test('an index mark turns the pending benchmarks into NIFTY 50 buy-and-hold; a delisted equal-weight holding keeps its last mark', async t => {
+  const { engine } = fixture(t);
+  engine.beginLive({ rows: rows(['A'], 40), assets: liveAssets, source: 'test live' });
+  engine.settings({ risk: { maxExposurePct: 60, maxPositionPct: 25 } });
+  engine.markIndex({ name: 'NIFTY 50', close: 25000 });
+  let s = engine.state;
+  assert.equal(s.benchmark.index, 'NIFTY 50'); approx(s.benchmark.units, 1000 / 25000); approx(s.cappedBenchmark.units, 600 / 25000);
+  approx(s.metrics.benchmarkEquity, 1000); approx(s.metrics.cappedBenchmarkEquity, 1000);
+  engine.appendBar(bar40()); await liveStep(engine);
+  assert.equal(engine.state.benchmark.positions.length, 0); // no equal-weight entry once the index book exists
+  engine.markIndex({ name: 'NIFTY 50', close: 26000 });
+  s = engine.state; approx(s.metrics.benchmarkEquity, 1040); approx(s.metrics.cappedBenchmarkEquity, 1024);
+  assert.throws(() => engine.markIndex({ name: 'NIFTY 50', close: 0 }), /positive close/);
+  // A run whose equal-weight benchmark already holds a name the scan later drops: valued at its last mark, never a crash.
+  const { engine: legacy } = fixture(t);
+  legacy.beginLive({ rows: rows(['A', 'B'], 40), assets: [...liveAssets, { symbol: 'B', name: 'B', sector: 'Test' }], source: 'test live' });
+  legacy.appendBar(bar40('ticks', { A: { open: 140, high: 142, low: 139, close: 141, volume: 1000 }, B: { open: 10, high: 12, low: 9, close: 11, volume: 5 } })); await liveStep(legacy);
+  legacy.state.positions = legacy.state.positions.filter(p => p.symbol !== 'B'); legacy.updateMetrics(); legacy.store.save(legacy.state, 'test-fixture'); // flat in B, so it may leave
+  const before = legacy.state.metrics.benchmarkEquity, bHolding = legacy.state.benchmark.positions.find(p => p.symbol === 'B');
+  assert.equal(bHolding.markPrice, 11);
+  legacy.relist({ rows: rows(['A', 'C'], 42), universe: ['A', 'C'] });
+  assert.ok(Number.isFinite(legacy.state.metrics.benchmarkEquity)); assert.equal(legacy.state.benchmark.positions.find(p => p.symbol === 'B').markPrice, 11);
+  assert.notEqual(before, undefined);
+});

@@ -18,7 +18,7 @@ The 1–2% per day idea is not a target. Compounded for a year it is 12× to 147
 
 | Phase | What runs | Money at risk | Exit bar |
 |---|---|---|---|
-| 1 — Prospective paper | Live Kite data on the VPS, rules-only strategies, simulated fills, full cost model | None (₹500/month data + VPS) | 40 trading sessions; net ≥ 0 after fixed costs; beats equal-weight buy-and-hold on the watchlist; no unexplained ledger difference; no missed protective exit |
+| 1 — Prospective paper | Live Kite data on the VPS, rules-only strategies, simulated fills, full cost model | None (₹500/month data + VPS) | 40 trading sessions; net ≥ 0 after fixed costs; beats NIFTY 50 buy-and-hold over the same sessions (from 27 Oct 2026; was equal-weight buy-and-hold on the fixed watchlist, which a rotating watchlist no longer defines); no unexplained ledger difference; no missed protective exit |
 | 1b — Expert shadow | Same live stream; the expert thesis-and-decision loop on research evidence, in a second paper book ([design](superpowers/specs/2026-10-18-phase1b-expert-shadow-design.md)) | None | Over the same 40 clean sessions: the expert book's net after costs beats the rules book and buy-and-hold |
 | 2 — Capped live | Real orders through Kite with the Phase 1 configuration | An amount I set in writing, with a written max loss | Fills and costs match paper assumptions; no duplicate or uncertain orders |
 | 3 — Expand | More capital, instruments, horizons; US markets | Decided then | Decided then |
@@ -41,7 +41,7 @@ Values the bot uses that only I can set. Defaults are what Phase 1 starts with; 
 | Decision | Phase 1 default | Set by |
 |---|---|---|
 | Starting paper capital | ₹5,00,000 for both books (from 27 Oct 2026; was ₹9,000). Paper results at this size understate the weight of flat charges on a small real account | me |
-| Universe | 10 liquid NSE stocks priced under ₹1,500/share (so one share is affordable) | me, before Phase 1 |
+| Universe | Opportunistic from 27 Oct 2026: a pre-market scan (08:15 IST) over every NSE equity under ₹1,500 with ≥ ₹25 crore of last-session turnover ranks positive 20-session momentum with relative volume and fills up to 20 slots (`scan` settings); a name with an open position in either book keeps its slot until exited. Was a fixed list of 10 | me |
 | Bar size / horizon | 15-minute closed bars; hold 1–5 sessions; delivery (CNC), long-only | me, before Phase 1 |
 | Risk per trade / max daily loss / max drawdown | 0.5% / 3% / 8%. Expert book only (27 Oct 2026, paper): the model's confidence scales risk per trade from 0.25× to 2× of 0.5%, never above 1% (`expert.maxRiskPerTradePct`); the daily report's calibration table checks whether its confidence means anything | me |
 | Phase 1 length | 40 trading sessions | me, before Phase 1 |

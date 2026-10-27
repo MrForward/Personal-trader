@@ -6,18 +6,19 @@ import { redact } from './secrets.mjs';
 import { SECTOR_INDEX } from './expert.mjs';
 import { isAnomaly } from './research.mjs';
 import { validateIntelligence } from './intelligence.mjs';
+import { scanWatchlist } from './scan.mjs';
 
 const WARMUP_BARS = 40, SKEW_MS = 5_000, SKEW_RUN = 3, CLEAN_BARS = 2, FLUSH_GRACE_MS = 30_000, MAX_BACKOFF_S = 300;
 const fatal = error => ['PERSISTENCE_ERROR', 'STALE_STATE'].includes(error?.code);
-const RESEARCH_AT = 8 * 60 + 30, THESES_AT = 8 * 60 + 45, DAILY_BARS = 60;
+const SCAN_AT = 8 * 60 + 15, RESEARCH_AT = 8 * 60 + 30, THESES_AT = 8 * 60 + 45, DAILY_BARS = 60, INDEX = 'NIFTY 50';
 const istMinutes = ms => Math.floor((ms + 330 * 60_000) / 60_000) % 1440;
 
 // Feeds live ticks into the engine one closed bar at a time. Every tick is captured before use so a day replays exactly.
 // With `expert` (Phase 1b), a second engine gets the same bars after the rules engine; its failures never reach the rules book.
 export class LiveRunner {
   constructor({ engine, session, captureDir, source = session.ticker(), calendar = sessionFor, now = Date.now, run = fn => fn(),
-    onFatal = () => {}, intervalMs = 10_000, log = message => process.stderr.write(`${redact(message)}\n`), expert = null }) {
-    Object.assign(this, { engine, session, captureDir, source, calendar, now, run, onFatal, intervalMs, log, expert });
+    onFatal = () => {}, intervalMs = 10_000, log = message => process.stderr.write(`${redact(message)}\n`), expert = null, scan = scanWatchlist }) {
+    Object.assign(this, { engine, session, captureDir, source, calendar, now, run, onFatal, intervalMs, log, expert, scan });
     this.state = 'idle'; this.pending = Promise.resolve(); this.timers = []; this.expertTask = Promise.resolve(); this.expertHalted = null;
     this.resetDay(null);
   }
@@ -27,6 +28,7 @@ export class LiveRunner {
     this.counters = { ticks: 0, badTicks: 0, rejectedRows: 0, warmupFailed: 0, disconnects: 0, ...(this.expert && { expertRejectedRows: 0 }) };
     // shortcut: anomaly calls are counted in memory, so a restart mid-session resets the cap; dailyCallLimit still bounds spend.
     this.researchStarted = false; this.thesesStarted = false; this.researchDone = false; this.thesesDone = false; this.anomalyCalls = 0; this.coverageMissing = new Set();
+    this.scanStarted = false; this.scanDone = false;
   }
   expertEngine() { return this.expert && !this.expertHalted ? this.expert.engine : null; }
   // True when the error was a storage fault: the expert book stops, the rules book carries on.
@@ -64,29 +66,68 @@ export class LiveRunner {
       }
       this.counters.warmupFailed++; this.log(`Warmup failed; continuing on ticks: ${error.message}`);
     }
-    this.builder = new BarBuilder({ barMinutes: this.barMinutes(), symbols: this.symbols(), session });
-    const last = this.engine.state.dataset.at(-1);
-    for (const symbol of this.symbols()) if (last.bars[symbol]) this.builder.seed(symbol, last.bars[symbol].close);
+    this.rebuildBuilder();
     this.state = 'live';
     this.connect();
-    this.scheduleExpert();
+    this.scheduleMorning();
     return this.status();
   }
   isLive(engine = this.engine) {
     const s = engine.state;
     return s.mode === 'prospective-paper' && s.liveBarMinutes === this.barMinutes() && JSON.stringify(s.assets.map(a => a.symbol).sort()) === JSON.stringify(this.symbols());
   }
-  async warmup() {
-    const endMs = this.now(), symbols = this.symbols();
+  rebuildBuilder() {
+    this.builder = new BarBuilder({ barMinutes: this.barMinutes(), symbols: this.symbols(), session: this.sessionWindow });
+    const last = this.engine.state.dataset.at(-1);
+    for (const symbol of this.symbols()) if (last.bars[symbol]) this.builder.seed(symbol, last.bars[symbol].close);
+  }
+  async warmupRows(symbols, endMs) {
     const bySymbol = await Promise.all(symbols.map(symbol => this.session.historicalBars({ symbol, barMinutes: this.barMinutes(), count: WARMUP_BARS, endMs })));
     const stamps = bySymbol.map(bars => new Map(bars.map(bar => [bar.timestamp, bar])));
-    const rows = [...stamps[0].keys()].filter(stamp => stamps.every(map => map.has(stamp))).sort()
+    return [...stamps[0].keys()].filter(stamp => stamps.every(map => map.has(stamp))).sort()
       .map(timestamp => ({ timestamp, bars: Object.fromEntries(symbols.map((symbol, i) => { const { timestamp: _t, ...bar } = stamps[i].get(timestamp); return [symbol, bar]; })) }));
+  }
+  async warmup() {
+    const endMs = this.now(), symbols = this.symbols();
+    const rows = await this.warmupRows(symbols, endMs);
     this.load(this.engine, rows, symbols);
     const expert = this.expertEngine();
+    if (expert) { try { this.load(expert, rows, symbols); } catch (error) { if (!this.expertFault(error)) this.log(`Expert warmup failed: ${error.message}`); } }
+    try { await this.markIndex(endMs); } catch (error) { if (fatal(error)) throw error; this.log(`${INDEX} benchmark mark unavailable: ${error.message}`); }
     if (!expert) return;
-    try { this.load(expert, rows, symbols); } catch (error) { if (!this.expertFault(error)) this.log(`Expert warmup failed: ${error.message}`); }
     try { await this.dailyWarmup(expert.store, symbols, endMs); } catch (error) { this.expertError(error, 'Expert daily warmup failed'); }
+  }
+  // Benchmark: the index's last daily close marks both books' buy-and-hold comparison once per warmup and relist.
+  async markIndex(endMs) {
+    const bar = (await this.session.historicalBars({ symbol: INDEX, barMinutes: 'day', count: 1, endMs })).at(-1);
+    if (!bar) return;
+    this.engine.markIndex({ name: INDEX, close: bar.close });
+    const expert = this.expertEngine();
+    if (expert) { try { expert.markIndex({ name: INDEX, close: bar.close }); } catch (error) { this.expertError(error, 'Expert index mark failed'); } }
+  }
+  // Pre-market scan (08:15 IST): held names keep their slot, the rest of the watchlist is refilled from the day's ranked candidates.
+  async scanPass() {
+    const engines = [this.engine, this.expertEngine()].filter(Boolean);
+    try {
+      const held = [...new Set(engines.flatMap(engine => engine.state.positions.map(p => p.symbol)))];
+      const universe = await this.scan({ session: this.session, settings: this.engine.state.settings, held, endMs: this.now(), log: this.log });
+      if (JSON.stringify(universe) !== JSON.stringify(this.symbols())) await this.relist(universe);
+      this.scanDone = true;
+    } catch (error) { if (fatal(error)) return this.die(error); this.log(`Watchlist scan failed; keeping ${this.symbols().join(', ')}: ${error.message}`); }
+  }
+  async relist(universe) {
+    const endMs = this.now(), rows = await this.warmupRows(universe, endMs);
+    await this.run(() => {
+      this.engine.relist({ rows, universe });
+      const expert = this.expertEngine();
+      if (expert) { try { expert.relist({ rows, universe }); } catch (error) { this.expertError(error, 'Expert relist failed'); } }
+    });
+    this.log(`Watchlist: ${universe.join(', ')}`);
+    // A bar in progress on the old symbol set is dropped; before the open there is none.
+    this.rebuildBuilder();
+    if (this.state === 'live') this.connect();
+    const expert = this.expertEngine();
+    if (expert) { try { await this.dailyWarmup(expert.store, this.symbols(), endMs); } catch (error) { this.expertError(error, 'Expert daily warmup failed'); } }
   }
   load(engine, rows, symbols) {
     if (!this.isLive(engine)) {
@@ -160,10 +201,12 @@ export class LiveRunner {
       }
     } catch (error) { this.expertError(error, `Anomaly scan after ${row.timestamp} failed`); }
   }
-  // Research at 08:30 IST, theses at 08:45 IST, each once per session day; a later start runs them at warmup, research first.
-  scheduleExpert() {
-    if (!this.expertEngine() || !this.builder) return;
+  // Scan at 08:15 IST, research at 08:30, theses at 08:45, each once per session day and in that order; a later start runs them at warmup.
+  scheduleMorning() {
+    if (!this.builder) return;
     const minutes = istMinutes(this.now());
+    if (this.engine.state.settings.scan.enabled && !this.scanStarted && minutes >= SCAN_AT) { this.scanStarted = true; this.expertTask = this.expertTask.then(() => this.scanPass()); }
+    if (!this.expertEngine()) return;
     if (!this.researchStarted && minutes >= RESEARCH_AT) { this.researchStarted = true; this.expertTask = this.expertTask.then(() => this.researchPass()); }
     if (!this.thesesStarted && minutes >= THESES_AT) { this.thesesStarted = true; this.expertTask = this.expertTask.then(() => this.thesesPass()); }
   }
@@ -210,7 +253,7 @@ export class LiveRunner {
   poll() {
     const now = this.now(), window = this.sessionWindow;
     if (!window || !['live', 'disconnected', 'login-needed'].includes(this.state)) return;
-    this.scheduleExpert();
+    this.scheduleMorning();
     if (this.state === 'live' && this.builder) {
       const row = this.builder.flush(now);
       if (row) this.handleRow(row);
@@ -273,7 +316,7 @@ export class LiveRunner {
   stop() { this.stopTimers(); this.source.stop(); this.state = 'idle'; }
   async idle() { await this.expertTask; return this.pending; }
   status() {
-    return { state: this.state, day: this.day, lastTickAt: this.lastTickAt ? new Date(this.lastTickAt).toISOString() : null, barsToday: this.barsToday,
+    return { state: this.state, day: this.day, lastTickAt: this.lastTickAt ? new Date(this.lastTickAt).toISOString() : null, barsToday: this.barsToday, scanDone: this.scanDone,
       counters: { ...this.counters, ...(this.builder?.counters ?? {}) }, cleanBarsSinceGap: this.cleanBarsSinceGap, skewed: this.skewed,
       ...(this.expert && { expert: { enabled: true, researchDone: this.researchDone, thesesDone: this.thesesDone, anomalyCalls: this.anomalyCalls,
         limitUntil: this.expert.decider?.limitUntil ? new Date(this.expert.decider.limitUntil).toISOString() : null, coverageMissing: [...this.coverageMissing].sort(), halted: this.expertHalted } }) };

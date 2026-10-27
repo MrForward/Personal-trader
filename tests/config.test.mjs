@@ -62,3 +62,8 @@ test('expert maxRiskPerTradePct defaults to 1 and is bounded', () => {
   assert.equal(validateSettings({ expert: { maxRiskPerTradePct: 2 } }).expert.maxRiskPerTradePct, 2);
   for (const bad of [0, 5.1, NaN, '1']) assert.throws(() => validateSettings({ expert: { maxRiskPerTradePct: bad } }), /maxRiskPerTradePct/);
 });
+test('scan settings are validated and default to a 20-slot daily scan', () => {
+  assert.deepEqual(DEFAULT_SETTINGS.scan, { enabled: true, slots: 20, maxPrice: 1500, minTurnoverCr: 25 });
+  assert.equal(validateSettings({ scan: { enabled: false } }).scan.slots, 20);
+  for (const bad of [{ slots: 0 }, { slots: 21 }, { slots: 2.5 }, { maxPrice: 0 }, { minTurnoverCr: -1 }, { enabled: 'yes' }, { unknown: 1 }]) assert.throws(() => validateSettings({ scan: bad }), /scan/);
+});

@@ -44,7 +44,8 @@ function mark(state, row, field = 'close') {
   const drawdown = state.peakEquity ? 100 * (state.peakEquity - equity) / state.peakEquity : 0;
   state.maxDrawdownPct = Math.max(state.maxDrawdownPct, drawdown);
   const dailyLoss = state.sessionStartingEquity > 0 ? Math.max(0, 100 * (state.sessionStartingEquity - equity) / state.sessionStartingEquity) : 0;
-  const bookValue = book => book.cash + book.positions.reduce((sum, p) => sum + p.quantity * row.bars[p.symbol][field], 0);
+  const bookValue = book => book.index ? book.cash + book.units * book.indexPrice
+    : book.cash + book.positions.reduce((sum, p) => sum + p.quantity * (p.markPrice = row.bars[p.symbol]?.[field] ?? p.markPrice), 0);
   state.metrics = {
     equity: money(equity), cash: money(state.cash), realizedPnl: money(state.realizedPnl),
     unrealizedPnl: money(state.positions.reduce((sum, p) => sum + p.unrealizedPnl, 0)),
@@ -64,6 +65,13 @@ function checkRisk(state, row, field = 'close') {
   }
   if (state.riskLatched) state.status = 'risk-paused';
   return values;
+}
+// A held name cannot leave the universe and the bar size cannot change with positions open.
+function guardUniverse(nextSettings, state) {
+  if (nextSettings.barMinutes !== state.settings.barMinutes && state.positions.length) throw new Error('Close open positions before changing the bar size.');
+  if (JSON.stringify(nextSettings.universe) === JSON.stringify(state.settings.universe)) return;
+  const removed = [...new Set(state.positions.map(p => p.symbol).filter(symbol => !nextSettings.universe.includes(symbol)))];
+  if (removed.length) throw new Error(`Close open positions in ${removed.join(', ')} before removing them from the universe.`);
 }
 const storageFailure = error => ['PERSISTENCE_ERROR', 'STALE_STATE'].includes(error?.code);
 function safeMessage(error) {
@@ -102,7 +110,7 @@ export class TradingEngine {
     this.state.settings.universe ??= DEFAULT_SETTINGS.universe; this.state.settings.barMinutes ??= DEFAULT_SETTINGS.barMinutes;
     this.state.settings.simulation.costSchedule ??= DEFAULT_SETTINGS.simulation.costSchedule; delete this.state.settings.simulation.feeBps;
     this.state.settings.simulation.fixedCostsPerMonthInr ??= DEFAULT_SETTINGS.simulation.fixedCostsPerMonthInr; this.state.settings.simulation.spendCapPerMonthInr ??= DEFAULT_SETTINGS.simulation.spendCapPerMonthInr;
-    this.state.settings.expert ??= clone(DEFAULT_SETTINGS.expert);
+    this.state.settings.expert ??= clone(DEFAULT_SETTINGS.expert); this.state.settings.scan ??= clone(DEFAULT_SETTINGS.scan);
     this.state.cappedBenchmark ??= benchmark(this.state.settings.simulation.startingCapital, true);
     this.state.riskLatched ??= this.state.status === 'risk-paused';
     this.state.sessionDay ??= sessionDay(this.state.dataset[this.state.cursor].timestamp);
@@ -112,7 +120,7 @@ export class TradingEngine {
     this.updateMetrics();
     this.store.save(this.state, 'startup', { mode: 'paper', status: this.state.status, cursor: this.state.cursor });
   }
-  histories(symbol, cursor = this.state.cursor, state = this.state) { return state.dataset.slice(0, cursor + 1).map(row => row.bars[symbol]); }
+  histories(symbol, cursor = this.state.cursor, state = this.state) { return state.dataset.slice(0, cursor + 1).map(row => row.bars[symbol]).filter(Boolean); }
   updateMetrics() { return checkRisk(this.state, this.state.dataset[this.state.cursor]); }
   assertMutable() {
     if (this.busy) throw new Error('Engine is busy; wait for the current mutation to finish.');
@@ -155,8 +163,10 @@ export class TradingEngine {
   snapshot() {
     const s = this.state, row = s.dataset[s.cursor];
     const { dataset, benchmark: full, cappedBenchmark: capped, intelligenceRecords, ...publicState } = s;
-    const compare = book => ({ label: book.label, note: book.note, fees: money(book.fees ?? 0),
-      exposurePct: s.metrics.equity > 0 ? 100 * book.positions.reduce((sum, p) => sum + p.quantity * row.bars[p.symbol].close, 0) / (book.cash + book.positions.reduce((sum, p) => sum + p.quantity * row.bars[p.symbol].close, 0)) : 0 });
+    const compare = book => {
+      const invested = book.index ? book.units * book.indexPrice : book.positions.reduce((sum, p) => sum + p.quantity * (row.bars[p.symbol]?.close ?? p.markPrice), 0);
+      return { label: book.label, note: book.note, fees: money(book.fees ?? 0), index: book.index ?? null, exposurePct: s.metrics.equity > 0 && book.cash + invested > 0 ? 100 * invested / (book.cash + invested) : 0 };
+    };
     return clone({ ...publicState, busy: this.busy,
       decisions: s.decisions.slice(-300).reverse(), trades: s.trades.slice(-300).reverse(), strategies: STRATEGIES, providerStatus: providerStatus(),
       market: s.assets.map(asset => ({ ...asset, price: row.bars[asset.symbol].close,
@@ -172,7 +182,7 @@ export class TradingEngine {
     if (this.state.persistenceFault) throw new Error('Reload or reset after the storage failure before changing settings.');
     const nextSettings = validateSettings(input, this.state.settings);
     const next = clone(this.state);
-    if ((JSON.stringify(nextSettings.universe) !== JSON.stringify(next.settings.universe) || nextSettings.barMinutes !== next.settings.barMinutes) && next.positions.length) throw new Error('Close open positions before changing the universe or bar size.');
+    guardUniverse(nextSettings, next);
     if (nextSettings.simulation.startingCapital !== next.settings.simulation.startingCapital) {
       if (next.cursor > INITIAL_CURSOR || next.trades.length || next.positions.length) throw new Error('Reset the paper run before changing starting capital.');
       const fresh = newState(nextSettings, next.dataset, next.assets, next.dataSource, next.intelligenceRecords);
@@ -183,6 +193,48 @@ export class TradingEngine {
     next.configHistory.push({ version: nextSettings.version, timestamp: new Date().toISOString(), settings: clone(nextSettings), note: 'Entry settings apply to new positions. Existing positions retain entry strategy/stops; portfolio loss caps are checked immediately and cannot clear a latched breach.' });
     checkRisk(next, next.dataset[next.cursor]);
     return this.commit(next, 'settings', { version: nextSettings.version });
+  }); }
+  // Live watchlist change: swaps the universe and adds `rows` (broker history) for the new names onto the existing dataset. The book, its
+  // trades and its benchmarks carry on; a held name cannot leave. Rows older than the dataset's first bar are dropped.
+  relist({ rows, universe }) { return this.exclusive(() => {
+    if (this.state.mode !== 'prospective-paper') throw new Error('Relist applies only to a live run.');
+    if (this.state.persistenceFault) throw new Error('Reload or reset after the storage failure before changing settings.');
+    const nextSettings = validateSettings({ universe }, this.state.settings), next = clone(this.state);
+    guardUniverse(nextSettings, next);
+    const symbols = [...nextSettings.universe].sort(), added = symbols.filter(symbol => !next.assets.some(asset => asset.symbol === symbol));
+    const incoming = validateDataset(rows.map(({ source: _source, ...row }) => row)).rows;
+    const byStamp = new Map(incoming.map(row => [row.timestamp, row.bars]));
+    for (const row of next.dataset) {
+      for (const symbol of Object.keys(row.bars)) if (!symbols.includes(symbol)) delete row.bars[symbol];
+      for (const symbol of added) if (byStamp.get(row.timestamp)?.[symbol]) row.bars[symbol] = byStamp.get(row.timestamp)[symbol];
+    }
+    const lastMs = Date.parse(next.dataset.at(-1).timestamp);
+    for (const row of incoming) if (Date.parse(row.timestamp) > lastMs && symbols.every(symbol => row.bars[symbol])) next.dataset.push({ ...row, source: 'historical' });
+    next.cursor = next.dataset.length - 1;
+    const missing = symbols.filter(symbol => !next.dataset[next.cursor].bars[symbol]);
+    if (missing.length) throw new Error(`Warmup rows do not reach the current bar for ${missing.join(', ')}.`);
+    next.assets = symbols.map(symbol => next.assets.find(asset => asset.symbol === symbol) ?? { symbol, name: symbol, sector: 'NSE' });
+    next.settings = nextSettings;
+    next.configHistory.push({ version: nextSettings.version, timestamp: new Date().toISOString(), settings: clone(nextSettings), note: 'Watchlist scan: held names kept their slot.' });
+    checkRisk(next, next.dataset[next.cursor]);
+    return this.commit(next, 'relist', { version: nextSettings.version, symbols, added, rows: next.dataset.length });
+  }); }
+  // Buy-and-hold on an index (NIFTY 50) instead of the watchlist: entered at the first close supplied, then re-marked at each later one.
+  markIndex({ name, close }) { return this.exclusive(() => {
+    if (typeof name !== 'string' || !name || typeof close !== 'number' || !(close > 0)) throw new Error('Index mark needs a name and a positive close.');
+    const next = clone(this.state);
+    for (const book of [next.benchmark, next.cappedBenchmark]) {
+      if (book.pending) {
+        const fraction = book.capped ? next.settings.risk.maxExposurePct / 100 : 1;
+        book.index = name; book.units = next.settings.simulation.startingCapital * fraction / close; book.cash -= book.units * close;
+        book.pending = false; book.entryTimestamp = next.dataset[next.cursor].timestamp; book.configVersion = next.settings.version;
+        book.label = `${book.capped ? 'Capped' : 'Fully allocated'} ${name} buy-and-hold comparison`;
+        book.note = `Static ${name} buy-and-hold, marked at daily closes, no charges. ${book.capped ? 'Sized to the exposure cap.' : ''}`.trim();
+      }
+      if (book.index === name) book.indexPrice = close;
+    }
+    checkRisk(next, next.dataset[next.cursor]);
+    return this.commit(next, 'index-mark', { name, close });
   }); }
   control(action) { return this.exclusive(() => {
     const next = clone(this.state);

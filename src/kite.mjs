@@ -26,17 +26,17 @@ export class KiteSession {
     if (saved) { registerSecret(saved.accessToken); this.client.setAccessToken(saved.accessToken); }
   }
   loginUrl() { return this.client.getLoginURL(); }
+  // Stores every NSE token (equities and indices) so the watchlist can change between logins; the ticker subscribes only to the universe.
   async complete(requestToken, universe) {
     const result = await this.client.generateSession(requestToken, this.apiSecret);
     registerSecret(result.access_token);
     this.client.setAccessToken(result.access_token);
     // The SDK parses Kite's instrument CSV, so tokens arrive as strings; the WebSocket only honours numeric tokens.
-    const listed = new Map((await this.client.getInstruments('NSE')).map(item => [item.tradingsymbol, Number(item.instrument_token)]));
-    const missing = universe.filter(symbol => !listed.has(symbol));
+    const listed = Object.fromEntries((await this.client.getInstruments('NSE')).map(item => [item.tradingsymbol, Number(item.instrument_token)]));
+    const missing = universe.filter(symbol => !listed[symbol]);
     if (missing.length) throw new Error(`Unknown NSE symbols: ${missing.join(', ')}`);
     const now = this.now(), expiresAt = new Date(nextSixAmIst(now)).toISOString();
-    this.store.saveKiteSession({ accessToken: result.access_token, userId: result.user_id, issuedAt: new Date(now).toISOString(), expiresAt,
-      instruments: Object.fromEntries(universe.map(symbol => [symbol, listed.get(symbol)])) });
+    this.store.saveKiteSession({ accessToken: result.access_token, userId: result.user_id, issuedAt: new Date(now).toISOString(), expiresAt, instruments: listed });
     // shortcut: the SDK keeps its socket and handlers at module level, so one ticker per process gets the new token in place.
     if (this.sdkTicker) this.sdkTicker.access_token = result.access_token;
     this.expiredSignalled = false;
@@ -51,18 +51,25 @@ export class KiteSession {
     const saved = this.store.loadKiteSession();
     if (saved) this.store.saveKiteSession({ ...saved, expiresAt: new Date(this.now()).toISOString() });
   }
-  // Universe tokens come from the stored map (the ticker subscribes to those); a universe symbol missing there needs a new login.
-  // Anything else, such as an index, comes from one NSE instrument list per process, keeping index tokens out of the map and the live stream.
-  async tokenFor(symbol) {
-    const stored = this.status().instruments[symbol];
-    if (stored || this.status().state === 'none' || this.universe().includes(symbol)) return stored;
-    this.listed ??= this.client.getInstruments('NSE').then(list => new Map(list.map(item => [item.tradingsymbol, Number(item.instrument_token)])), error => { this.listed = null; throw error; });
-    return (await this.listed).get(symbol);
+  tokenFor(symbol) { return this.status().instruments[symbol]; }
+  // Listed equity symbols from the login's instrument map: plain series only, no '-BE'/'-SM' style suffixes.
+  equities() { return Object.keys(this.status().instruments).filter(symbol => /^[A-Z0-9&]+$/.test(symbol)); }
+  // Last price, last session volume and average price per symbol, fetched 500 at a time (Kite's quote limit).
+  async quotes(symbols) {
+    const out = {};
+    for (let i = 0; i < symbols.length; i += 500) {
+      const batch = symbols.slice(i, i + 500), data = await this.client.getQuote(batch.map(symbol => `NSE:${symbol}`));
+      for (const symbol of batch) {
+        const q = data[`NSE:${symbol}`];
+        if (q) out[symbol] = { price: q.last_price, volume: q.volume ?? 0, averagePrice: q.average_price ?? q.last_price };
+      }
+    }
+    return out;
   }
   async historicalBars({ symbol, barMinutes, count, endMs }) {
     const interval = INTERVALS[barMinutes];
     if (!interval) throw new Error(`Unsupported bar size: ${barMinutes} minutes.`);
-    const token = await this.tokenFor(symbol);
+    const token = this.tokenFor(symbol);
     if (!token) throw new Error(`No instrument token for ${symbol}; log in again.`);
     const daily = barMinutes === 'day';
     const candles = await this.client.getHistoricalData(token, interval, new Date(endMs - (daily ? 120 : 10) * DAY_MS), new Date(endMs));
@@ -98,9 +105,14 @@ export class KiteSession {
   bindTicker() {
     const t = this.makeTicker(this.apiKey, this.store.loadKiteSession()?.accessToken);
     this.sdkTicker = t;
-    const tokens = () => Object.values(this.status().instruments);
-    const symbolOf = () => new Map(Object.entries(this.status().instruments).map(([symbol, token]) => [token, symbol]));
-    this.subscribeAll = () => { const list = tokens(); t.subscribe(list); t.setMode(t.modeFull, list); };
+    const live = () => { const all = this.status().instruments; return Object.fromEntries(this.universe().filter(symbol => all[symbol]).map(symbol => [symbol, all[symbol]])); };
+    let subscribed = [];
+    this.subscribeAll = () => {
+      const list = Object.values(live()), gone = subscribed.filter(token => !list.includes(token));
+      if (gone.length) t.unsubscribe(gone);
+      t.subscribe(list); t.setMode(t.modeFull, list); subscribed = list;
+    };
+    const symbolOf = () => new Map(Object.entries(live()).map(([symbol, token]) => [token, symbol]));
     t.on('connect', () => this.subscribeAll());
     t.on('ticks', ticks => {
       const symbols = symbolOf();

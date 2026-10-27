@@ -34,19 +34,19 @@ function followingClock(source, clock, offsetMs = 100) {
   return { start: handlers => source.start({ ...handlers, onTick: tick => { clock.now = tick.exchangeTime + offsetMs; return handlers.onTick(tick); } }), stop: () => source.stop() };
 }
 const ABSTAIN = { action: 'abstain', reason: 'No trigger', evidence: [], counterEvidence: [], tightenStopTo: null, trigger: null, record: null };
-function setup(t, { store, session = fakeSession(), source = replayCapture(FIXTURE), clockStart = OPEN - 60_000, offsetMs, calendar = () => session14, onFatal, universe = ['DEMO1', 'DEMO2'], expert, log } = {}) {
+function setup(t, { store, session = fakeSession(), source = replayCapture(FIXTURE), clockStart = OPEN - 60_000, offsetMs, calendar = () => session14, onFatal, universe = ['DEMO1', 'DEMO2'], expert, log, scan = false, scanner } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'live-')); t.after(() => rmSync(dir, { recursive: true, force: true }));
   store ??= new Store(':memory:');
   const engine = new TradingEngine(store);
-  engine.settings({ universe, simulation: { startingCapital: 9000 } });
+  engine.settings({ universe, simulation: { startingCapital: 9000 }, scan: { enabled: scan } });
   let book = null;
   if (expert) {
     const expertEngine = new TradingEngine(expert.store ?? new Store(':memory:'), { decider: expert.decider ?? (async () => ABSTAIN) });
-    expertEngine.settings({ universe, simulation: { startingCapital: 9000 }, ...expert.settings });
+    expertEngine.settings({ universe, simulation: { startingCapital: 9000 }, scan: { enabled: scan }, ...expert.settings });
     book = { engine: expertEngine, decider: expert.decider ?? { limitUntil: 0 }, research: expert.research ?? (async () => ({ records: [] })), theses: expert.theses ?? (async () => {}), scoring: expert.scoring ?? (() => {}) };
   }
   const clock = { now: clockStart };
-  const runner = new LiveRunner({ engine, session, captureDir: dir, calendar, now: () => clock.now, source: followingClock(source, clock, offsetMs), intervalMs: 0, onFatal, expert: book, ...(log && { log }) });
+  const runner = new LiveRunner({ engine, session, captureDir: dir, calendar, now: () => clock.now, source: followingClock(source, clock, offsetMs), intervalMs: 0, onFatal, expert: book, ...(log && { log }), ...(scanner && { scan: scanner }) });
   return { engine, store, runner, clock, dir, session, expert: book };
 }
 const ledger = engine => JSON.stringify({ trades: engine.state.trades.map(({ id, ...trade }) => trade), outcomes: engine.state.decisions.map(d => d.outcome), equity: engine.state.metrics.equity });
@@ -440,7 +440,7 @@ test('daily index warmup fetches NIFTY 50 and sector indices once per day', asyn
   assert.equal(runner.status().state, 'live');
   assert.deepEqual(Object.keys(expert.engine.store.dailyFor(DAY)), ['INFY', 'ITC', 'NIFTY 50', 'NIFTY BANK', 'NIFTY FMCG', 'SBIN']);
   await runner.start(); await runner.idle();
-  assert.deepEqual(session.calls.filter(symbol => symbol.startsWith('NIFTY')).sort(), ['NIFTY 50', 'NIFTY BANK', 'NIFTY FMCG', 'NIFTY IT', 'NIFTY IT']);
+  assert.deepEqual(session.calls.filter(symbol => symbol.startsWith('NIFTY')).sort(), ['NIFTY 50', 'NIFTY 50', 'NIFTY 50', 'NIFTY BANK', 'NIFTY FMCG', 'NIFTY IT', 'NIFTY IT']); // benchmark mark at each warmup, daily pack once
   assert.ok(expert.engine.store.dailyFor(DAY)['NIFTY IT']);
 });
 
@@ -479,4 +479,31 @@ test('fix #1: a daily-bar store read that throws during warmup is counted on the
   assert.equal(runner.status().state, 'live'); assert.equal(engine.state.mode, 'prospective-paper');
   assert.equal(runner.status().counters.warmupFailed, 0); assert.equal(runner.status().counters.rejectedRows, 0);
   assert.equal(runner.status().counters.expertRejectedRows, 1); assert.equal(expert.engine.state.mode, 'prospective-paper');
+});
+
+test('the 08:15 scan relists both books onto the ranked watchlist, keeps held names, and a scan that drops a held name is refused and logged', async t => {
+  const { chooseWatchlist } = await import('../src/scan.mjs');
+  let ranked = ['DEMO3', 'DEMO1'];
+  const seen = [], logs = [];
+  const scanner = async ({ held, settings }) => { seen.push({ held, slots: settings.scan.slots }); return chooseWatchlist({ held, ranked, slots: 2 }); };
+  const source = manual();
+  const { engine, runner, expert } = setup(t, { source, scan: true, scanner, expert: {}, log: m => logs.push(m) });
+  await runner.start(); await runner.idle();
+  assert.equal(runner.status().state, 'live'); assert.equal(runner.status().scanDone, true);
+  assert.deepEqual(seen, [{ held: [], slots: 20 }]);
+  for (const book of [engine, expert.engine]) {
+    assert.deepEqual(book.state.settings.universe, ['DEMO1', 'DEMO3']); assert.deepEqual(book.state.assets.map(a => a.symbol), ['DEMO1', 'DEMO3']);
+    assert.ok(book.state.dataset.at(-1).bars.DEMO3 && !book.state.dataset.at(-1).bars.DEMO2); assert.equal(book.state.mode, 'prospective-paper');
+  }
+  assert.deepEqual([...runner.builder.symbols.keys()], ['DEMO1', 'DEMO3']);
+  assert.ok(logs.some(m => m === 'Watchlist: DEMO1, DEMO3'), logs.join('\n'));
+  // A ranked list that leaves out a held name cannot pass the engine's guard; the watchlist stays put.
+  engine.state.positions.push({ id: 'p', symbol: 'DEMO1', quantity: 1, entryPrice: 90, markPrice: 90, entryFee: 0, stopPrice: 1, takeProfitPrice: 999, trailingStopPct: 0, peakPrice: 90, strategyId: 'momentum', configVersion: 1, openedAt: 'x' });
+  ranked = ['DEMO2', 'DEMO3'];
+  await runner.scanPass();
+  assert.deepEqual(seen.at(-1).held, ['DEMO1']); assert.deepEqual(engine.state.settings.universe, ['DEMO1', 'DEMO2']); // held first, best new name second
+  const badScanner = runner.scan; runner.scan = async () => ['DEMO2', 'DEMO3'];
+  await runner.scanPass(); runner.scan = badScanner;
+  assert.deepEqual(engine.state.settings.universe, ['DEMO1', 'DEMO2']);
+  assert.ok(logs.some(m => /Watchlist scan failed.*Close open positions in DEMO1/.test(m)), logs.join('\n'));
 });
