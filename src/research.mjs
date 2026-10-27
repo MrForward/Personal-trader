@@ -35,7 +35,8 @@ async function collect({ symbol, extra, now, settings, schema, runner }) {
   const { researchModel, allowedDomains } = settings.expert;
   const nowMs = now();
   const out = await runner({
-    model: researchModel, systemPrompt: SYSTEM_PROMPT, schema, maxTurns: 3, timeoutMs: 120000,
+    // Live run (27 Oct 2026): 3 turns ran out mid-search (error_max_turns, no output); a search, a few fetches and the answer need ~8.
+    model: researchModel, systemPrompt: SYSTEM_PROMPT, schema, maxTurns: 8, timeoutMs: 120000,
     tools: ['WebSearch', ...allowedDomains.map(d => `WebFetch(domain:${d})`)],
     input: JSON.stringify({ symbol, ...extra, nowIst: istString(nowMs), allowedDomains, window: WINDOW }),
   });
