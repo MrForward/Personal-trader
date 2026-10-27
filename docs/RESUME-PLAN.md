@@ -45,7 +45,7 @@ Phase 1b is the expert shadow: a second paper book decided by Claude through the
 - Task 7, `src/expert.mjs`: nightly scoring, trade-driven reviews with memory, two-book daily reports and the scorecard.
 - Task 8, dashboard and docs: Expert panel, expert settings (section 05), two-book Reports columns, deploy steps for the setup-token and a pinned CLI, GOAL.md rows.
 
-**Verification:** `npm test` and `npm run typecheck` pass; the Expert panel, settings save and restart note were checked in a browser against the synthetic demo (expert off, then enabled and restarted). The populated panel and two-book Reports table were checked in the browser with mocked API responses. **Not verified:** any real `claude -p` call, setup-token login, research pass, live thesis or deploy on the VPS; that is the manual check at the end of the Model access section in `deploy/README.md`. The CLI version to pin is not yet recorded; the owner takes it from `claude --version` on the Mac.
+**Verification:** `npm test` and `npm run typecheck` pass; the Expert panel, settings save and restart note were checked in a browser against the synthetic demo (expert off, then enabled and restarted). The populated panel and two-book Reports table were checked in the browser with mocked API responses. **Not verified:** any real `claude -p` call, setup-token login, research pass, live thesis or deploy on the VPS; that is the manual check at the end of the Model access section in `deploy/README.md`. **CLI pin (27 Oct 2026):** `@anthropic-ai/claude-code@2.1.311`. Version 2.1.52 was rejected by the API for Opus 5.5 ("version 2.1.280 or newer is required"), and under `--json-schema` that showed up as a timeout. Pin the VPS to 2.1.311 or later.
 
 ## Earlier checkpoint — 16 October 2026
 
