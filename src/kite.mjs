@@ -30,7 +30,8 @@ export class KiteSession {
     const result = await this.client.generateSession(requestToken, this.apiSecret);
     registerSecret(result.access_token);
     this.client.setAccessToken(result.access_token);
-    const listed = new Map((await this.client.getInstruments('NSE')).map(item => [item.tradingsymbol, item.instrument_token]));
+    // The SDK parses Kite's instrument CSV, so tokens arrive as strings; the WebSocket only honours numeric tokens.
+    const listed = new Map((await this.client.getInstruments('NSE')).map(item => [item.tradingsymbol, Number(item.instrument_token)]));
     const missing = universe.filter(symbol => !listed.has(symbol));
     if (missing.length) throw new Error(`Unknown NSE symbols: ${missing.join(', ')}`);
     const now = this.now(), expiresAt = new Date(nextSixAmIst(now)).toISOString();
@@ -55,7 +56,7 @@ export class KiteSession {
   async tokenFor(symbol) {
     const stored = this.status().instruments[symbol];
     if (stored || this.status().state === 'none' || this.universe().includes(symbol)) return stored;
-    this.listed ??= this.client.getInstruments('NSE').then(list => new Map(list.map(item => [item.tradingsymbol, item.instrument_token])), error => { this.listed = null; throw error; });
+    this.listed ??= this.client.getInstruments('NSE').then(list => new Map(list.map(item => [item.tradingsymbol, Number(item.instrument_token)])), error => { this.listed = null; throw error; });
     return (await this.listed).get(symbol);
   }
   async historicalBars({ symbol, barMinutes, count, endMs }) {
@@ -88,7 +89,8 @@ export class KiteSession {
       start: handlers => {
         this.handlers = handlers;
         if (!this.sdkTicker) this.bindTicker();
-        this.sdkTicker.connect();
+        // The SDK's connect() is a no-op on an open socket, so a re-login or universe change must re-subscribe itself.
+        if (this.sdkTicker.connected()) this.subscribeAll(); else this.sdkTicker.connect();
       },
       stop: () => { this.handlers = null; this.sdkTicker?.disconnect(); },
     };
@@ -98,7 +100,8 @@ export class KiteSession {
     this.sdkTicker = t;
     const tokens = () => Object.values(this.status().instruments);
     const symbolOf = () => new Map(Object.entries(this.status().instruments).map(([symbol, token]) => [token, symbol]));
-    t.on('connect', () => { const list = tokens(); t.subscribe(list); t.setMode(t.modeFull, list); });
+    this.subscribeAll = () => { const list = tokens(); t.subscribe(list); t.setMode(t.modeFull, list); };
+    t.on('connect', () => this.subscribeAll());
     t.on('ticks', ticks => {
       const symbols = symbolOf();
       for (const tick of ticks) {

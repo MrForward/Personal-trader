@@ -21,7 +21,9 @@ export function fakeTicker() {
   const ticker = {
     access_token: null, subscribed: [], mode: null, connects: 0, disconnects: 0, modeFull: 'full',
     on: (event, callback) => { (handlers[event] ??= []).push(callback); },
-    emit: (event, ...args) => { for (const callback of handlers[event] ?? []) callback(...args); },
+    open: false,
+    connected: () => ticker.open,
+    emit: (event, ...args) => { if (event === 'connect') ticker.open = true; if (event === 'disconnect') ticker.open = false; for (const callback of handlers[event] ?? []) callback(...args); },
     connect: () => { ticker.connects++; },
     disconnect: () => { ticker.disconnects++; },
     subscribe: tokens => { ticker.subscribed = tokens; },

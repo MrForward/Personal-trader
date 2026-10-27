@@ -152,3 +152,33 @@ test('a universe symbol missing from the stored map still asks for a new login; 
   await assert.rejects(() => session.historicalBars({ ...args, symbol: 'C' }), /No instrument token for C; log in again/);
   assert.equal((await session.historicalBars({ ...args, symbol: 'NIFTY 50' }))[0].close, 4);
 });
+
+test('instrument tokens from the CSV instrument list are stored and subscribed as numbers', async t => {
+  // The real SDK parses Kite's instrument CSV, so instrument_token arrives as a string; the WebSocket ignores string tokens.
+  const client = fakeClient();
+  const list = await client.getInstruments();
+  client.getInstruments = async () => list.map(item => ({ ...item, instrument_token: String(item.instrument_token) }));
+  const { session, ticker } = setup(t, { client });
+  await session.complete('reqtoken123', ['A', 'B']);
+  assert.deepEqual(session.status().instruments, { A: 1, B: 2 });
+  const ticks = [];
+  session.ticker().start({ onTick: tick => ticks.push(tick), onClose: () => {} });
+  ticker.emit('connect');
+  assert.deepEqual(ticker.subscribed, [1, 2]);
+  ticker.emit('ticks', [{ instrument_token: 2, last_price: 50, volume_traded: 1, exchange_timestamp: new Date('2026-10-27T04:00:01Z') }]);
+  assert.equal(ticks.length, 1);
+});
+
+test('starting again on an open socket re-subscribes the current instruments', async t => {
+  const { session, ticker, client } = setup(t);
+  await session.complete('reqtoken123', ['A']);
+  const source = session.ticker();
+  source.start({ onTick: () => {}, onClose: () => {} });
+  ticker.emit('connect');
+  assert.deepEqual(ticker.subscribed, [1]);
+  // A later login (or a universe change) while the socket stays open: the SDK skips connect(), so no 'connect' event fires.
+  await session.complete('reqtoken456', ['A', 'B']);
+  source.start({ onTick: () => {}, onClose: () => {} });
+  assert.deepEqual(ticker.subscribed, [1, 2]); assert.deepEqual(ticker.mode, ['full', [1, 2]]);
+  assert.equal(ticker.connects, 1);
+});
