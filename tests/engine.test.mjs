@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.mjs';
-import { TradingEngine } from '../src/engine.mjs';
+import { TradingEngine, confidenceRiskPct } from '../src/engine.mjs';
 import { charges } from '../src/costs.mjs';
 
 function rows(symbols = ['A'], count = 36) {
@@ -451,4 +451,33 @@ test('dailyReport merges extra fields', t => {
   const payload = engine.dailyReport('2026-10-14', { flagged: false }, { expert: { scores: [{ decisionId: 'd1' }] } });
   assert.deepEqual(payload.expert.scores, [{ decisionId: 'd1' }]);
   assert.deepEqual(store.dailyReports()[0].expert.scores, [{ decisionId: 'd1' }]); assert.equal(engine.dailyReport('2026-10-15').expert, undefined);
+});
+
+test('confidenceRiskPct maps confidence to 0.25x-2x of base risk, capped only on the way up', () => {
+  const approxEq = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} vs ${b}`);
+  approxEq(confidenceRiskPct(0.5, 0, 1), 0.125);
+  approxEq(confidenceRiskPct(0.5, 1, 1), 1);
+  approxEq(confidenceRiskPct(0.5, 1, 0.8), 0.8);
+  approxEq(confidenceRiskPct(0.5, 3 / 7, 1), 0.5);
+  approxEq(confidenceRiskPct(0.5, null, 1), 0.5);
+  approxEq(confidenceRiskPct(5, 1, 1), 5); // a base above the cap is never cut by it
+});
+
+test('expert entries are sized by confidence and record it on decision, position and closing trade', async t => {
+  const make = confidence => expertEngine(t, ({ state }) => state.positions.length ? { action: 'exit', reason: 'done', record: {} } : { action: 'enter', reason: 'thesis', record: {}, confidence });
+  const low = make(0), high = make(1);
+  for (const e of [low, high]) { e.settings({ simulation: { startingCapital: 100000 }, risk: { riskPerTradePct: 0.5, stopLossPct: 2, maxPositionPct: 100, maxExposurePct: 100 }, expert: { maxRiskPerTradePct: 1 } }); await step(e); }
+  const [pl, ph] = [low.state.positions[0], high.state.positions[0]];
+  assert.ok(ph.quantity > pl.quantity * 4, `${ph.quantity} vs ${pl.quantity}`);
+  assert.equal(pl.confidence, 0); assert.equal(ph.riskPct, 1);
+  const d = high.state.decisions.at(-1); assert.equal(d.confidence, 1); assert.equal(d.riskPct, 1);
+  await step(high);
+  const sell = high.state.trades.find(trade => trade.action === 'SELL');
+  assert.equal(sell.confidence, 1); assert.equal(sell.riskPct, 1);
+});
+
+test('rules book sizing ignores confidence', async t => {
+  const { engine } = fixture(t); engine.settings({ risk: { trailingStopPct: 0 }, expert: { maxRiskPerTradePct: 5 } });
+  await step(engine);
+  assert.equal(engine.state.positions[0].riskPct, engine.state.settings.risk.riskPerTradePct);
 });

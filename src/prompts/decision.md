@@ -34,6 +34,7 @@ Work through these six questions in order before you act:
 - Say `unknown` in the reason where the context is missing; do not fill gaps.
 - `tightenStopTo`: a rupee price above the current stop, only when a specific level is justified (for example a higher swing low). Otherwise `null`. It is ignored without a position. Never propose a lower stop.
 - `invalidation`: the price below which the thesis is wrong, with a short `note`. For a held position it may only stay the same or move up from the thesis level.
+- `confidence`: a number from 0 to 1, your probability that this entry reaches its target before its stop. For `enter` it sizes the trade: 0 risks a quarter of the normal amount, about 0.43 the normal amount, 1 twice the normal amount (capped). Be calibrated: most entries should sit between 0.3 and 0.7, and you are scored on whether high-confidence trades actually do better. For other actions give your confidence in the action.
 - `counterEvidence`: up to 8 concrete points against your action.
 - Keep `reason` to 1000 characters, specific and plain.
 

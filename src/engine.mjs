@@ -86,6 +86,12 @@ export function applyTighten(state, position, stop, source, timestamp = new Date
   return true;
 }
 
+// Expert book only (owner decision, 27 Oct 2026, paper): confidence scales risk 0.25x-2x of the base; the cap limits only the scale-up.
+export function confidenceRiskPct(baseRiskPct, confidence, maxRiskPct) {
+  if (confidence === null || confidence === undefined) return baseRiskPct;
+  return Math.min(baseRiskPct * (0.25 + 1.75 * confidence), Math.max(baseRiskPct, maxRiskPct));
+}
+
 export class TradingEngine {
   constructor(store, { reviewer = reviewMarket, allowPaidCalls = false, intelligenceProvider = null, decider = null } = {}) {
     this.decider = decider;
@@ -301,7 +307,7 @@ export class TradingEngine {
     const pnl = (fill - position.entryPrice) * position.quantity - fee - position.entryFee;
     state.cash += fill * position.quantity - fee; state.fees += fee; state.realizedPnl += pnl;
     state.trades.push({ id: randomUUID(), timestamp, phase, symbol: position.symbol, action: 'SELL', quantity: position.quantity, price: fill, fee, charges: cost, fill: fillLabel(row),
-      realizedPnl: pnl, reason, strategyId: position.strategyId, configVersion: position.configVersion });
+      realizedPnl: pnl, reason, strategyId: position.strategyId, configVersion: position.configVersion, confidence: position.confidence ?? null, riskPct: position.riskPct ?? null });
     state.positions = state.positions.filter(p => p.id !== position.id);
   }
   initializeBenchmarks(state, row) {
@@ -338,9 +344,10 @@ export class TradingEngine {
     }
     const action = result.action === 'enter' && !position ? 'BUY' : result.action === 'exit' && position ? 'SELL' : 'HOLD';
     const evidence = result.evidence ?? [], counterEvidence = result.counterEvidence ?? [];
-    const candidate = { action, strategyId: 'expert', reason: result.reason, evidence, counterEvidence };
+    const confidence = Number.isFinite(result.confidence) ? result.confidence : null;
+    const candidate = { action, strategyId: 'expert', reason: result.reason, evidence, counterEvidence, confidence };
     const record = result.record ?? null;
-    return { asset, candidate, tightenStopTo: result.tightenStopTo ?? null, decision: { ...base, action, reason: result.reason, evidence, counterEvidence,
+    return { asset, candidate, tightenStopTo: result.tightenStopTo ?? null, decision: { ...base, action, reason: result.reason, evidence, counterEvidence, confidence,
       provider: record ? 'claude-code' : 'rules', model: record ? s.settings.expert?.decisionModel : 'deterministic rules', trigger: result.trigger ?? null, expert: record } };
   }
   async step(options = {}) { return this.exclusiveAsync(async () => {
@@ -402,7 +409,8 @@ export class TradingEngine {
         const feeRate = perShareRate(schedule, 'BUY'), sellRate = perShareRate(schedule, 'SELL'), cashCost = price * (1 + feeRate), equityCost = cashCost - bar.open;
         const stopPrice = price * (1 - risk.stopLossPct / 100), stopFill = stopPrice * (1 - s.settings.simulation.slippageBps / 10000);
         const plannedLoss = price - stopFill + price * feeRate + stopFill * sellRate, dpCharge = charges({ schedule, side: 'SELL', price: 1, quantity: 1, dpApplies: true }).dp;
-        const positionCap = risk.maxPositionPct / 100, exposureCap = risk.maxExposurePct / 100, riskCap = risk.riskPerTradePct / 100;
+        const riskPct = this.decider ? confidenceRiskPct(risk.riskPerTradePct, candidate.confidence, s.settings.expert?.maxRiskPerTradePct ?? 1) : risk.riskPerTradePct;
+        const positionCap = risk.maxPositionPct / 100, exposureCap = risk.maxExposurePct / 100, riskCap = riskPct / 100;
         let quantity = Math.max(0, Math.floor(Math.min(Number.MAX_SAFE_INTEGER, s.cash / cashCost,
           values.equity * positionCap / (price + positionCap * equityCost),
           (values.equity * exposureCap - values.exposure) / (bar.open + exposureCap * equityCost),
@@ -413,11 +421,11 @@ export class TradingEngine {
         const cost = charges({ schedule, side: 'BUY', price, quantity, dpApplies: false }), fee = cost.total;
         const p = { id: randomUUID(), symbol: asset.symbol, quantity, entryPrice: price, markPrice: bar.open, entryFee: fee, stopPrice,
           takeProfitPrice: price * (1 + risk.takeProfitPct / 100), trailingStopPct: risk.trailingStopPct, peakPrice: price,
-          strategyId: candidate.strategyId, configVersion: s.settings.version, openedAt: next.timestamp };
+          strategyId: candidate.strategyId, configVersion: s.settings.version, openedAt: next.timestamp, confidence: candidate.confidence ?? null, riskPct };
         s.positions.push(p); s.cash -= quantity * price + fee; s.fees += fee;
         s.trades.push({ id: randomUUID(), timestamp: next.timestamp, phase: 'open', symbol: asset.symbol, action: 'BUY', quantity, price, fee, charges: cost, fill: fillLabel(next), realizedPnl: 0,
           strategyId: candidate.strategyId, configVersion: s.settings.version, reason: candidate.reason });
-        decision.outcome = 'Paper buy filled';
+        decision.outcome = 'Paper buy filled'; decision.riskPct = riskPct;
       }
       // Phase 3: use the stop fixed at the bar open. If both levels touch, stop is first.
       for (const p of [...s.positions]) {

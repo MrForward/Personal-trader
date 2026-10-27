@@ -57,3 +57,8 @@ test('partial expert updates merge over previous values and settings without exp
   const { expert, ...legacy } = DEFAULT_SETTINGS;
   assert.deepEqual(validateSettings({}, legacy).expert, DEFAULT_SETTINGS.expert);
 });
+test('expert maxRiskPerTradePct defaults to 1 and is bounded', () => {
+  assert.equal(DEFAULT_SETTINGS.expert.maxRiskPerTradePct, 1);
+  assert.equal(validateSettings({ expert: { maxRiskPerTradePct: 2 } }).expert.maxRiskPerTradePct, 2);
+  for (const bad of [0, 5.1, NaN, '1']) assert.throws(() => validateSettings({ expert: { maxRiskPerTradePct: bad } }), /maxRiskPerTradePct/);
+});

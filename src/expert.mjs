@@ -97,10 +97,11 @@ export const THESIS_SCHEMA = {
 };
 
 export const DECISION_SCHEMA = {
-  type: 'object', additionalProperties: false, required: ['action', 'reason', 'counterEvidence', 'evidenceIds', 'tightenStopTo', 'invalidation'],
+  type: 'object', additionalProperties: false, required: ['action', 'reason', 'counterEvidence', 'evidenceIds', 'tightenStopTo', 'invalidation', 'confidence'],
   properties: {
     action: { type: 'string', enum: ['enter', 'hold', 'exit', 'abstain'] }, reason: text(1000), counterEvidence: textList,
     evidenceIds: { type: 'array', items: text(100) }, tightenStopTo: { type: ['number', 'null'] }, invalidation,
+    confidence: { type: 'number', minimum: 0, maximum: 1 },
   },
 };
 
@@ -134,6 +135,7 @@ export function validateThesis(value, { evidenceIds, sessionCloseIso, expectedHo
 
 export function validateDecision(value, { evidenceIds, position, thesis }) {
   checkShape(value, DECISION_SCHEMA, 'Decision');
+  if (!Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1) throw new Error('Decision confidence must be between 0 and 1.');
   checkEvidence(value.evidenceIds, evidenceIds, 'Decision');
   if (value.tightenStopTo !== null && value.tightenStopTo <= 0) throw new Error('Decision tightenStopTo must be a positive price.');
   if (position && value.invalidation.priceBelow < (thesis?.invalidation?.priceBelow ?? -Infinity)) throw new Error('Decision moves the invalidation down on a held position.');
@@ -193,6 +195,17 @@ async function recorded({ store, row, replay, live }) {
   return out;
 }
 
+const BUCKETS = [['low (<0.4)', 0, 0.4], ['medium (0.4-0.7)', 0.4, 0.7], ['high (>=0.7)', 0.7, Infinity]];
+/** Closed expert trades grouped by the confidence they were entered with: does higher confidence actually win more? */
+export function calibration(trades) {
+  const closed = trades.filter(t => t.action === 'SELL' && t.strategyId === 'expert' && Number.isFinite(t.confidence));
+  return BUCKETS.map(([bucket, lo, hi]) => {
+    const inBucket = closed.filter(t => t.confidence >= lo && t.confidence < hi), wins = inBucket.filter(t => t.realizedPnl > 0).length;
+    const n = inBucket.length;
+    return { bucket, trades: n, wins, winRate: n ? wins / n : null, avgPnl: n ? Math.round(inBucket.reduce((sum, t) => sum + t.realizedPnl, 0) / n * 100) / 100 : null };
+  });
+}
+
 /** The engine's decider for the expert book. Never mutates `state` or `context`; a rejection becomes a suppressed HOLD in the engine. */
 export function makeDecider({ store, engineName = 'expert', settings, runner = runClaudeCode, promptDir = PROMPT_DIR, dailyFor = day => store.dailyFor(day), marketFor = () => null, now = Date.now, replay = false }) {
   const prompt = loadPrompt(promptDir, 'decision', DECISION_SCHEMA);
@@ -226,7 +239,7 @@ export function makeDecider({ store, engineName = 'expert', settings, runner = r
     } });
     const decision = out.value, ids = evidenceMap(out.request.contextPack);
     return { action: decision.action, reason: decision.reason, evidence: decision.evidenceIds.map(id => `${id}: ${ids.get(id)}`), counterEvidence: [...decision.counterEvidence],
-      tightenStopTo: position ? decision.tightenStopTo : null, trigger, record: { ...decision, key, usage: out.usage, costUsd: out.costUsd } };
+      tightenStopTo: position ? decision.tightenStopTo : null, confidence: decision.confidence ?? null, trigger, record: { ...decision, key, usage: out.usage, costUsd: out.costUsd } };
   };
   decider.limitUntil = 0;
   return decider;
@@ -345,7 +358,7 @@ export function makeScoring({ expertEngine, rulesEngine, runner, replay = false,
     const covered = new Set(state.intelligenceRecords?.filter(r => istDay.format(Date.parse(r.firstReceivedAt)) === day).map(r => r.symbol));
     const suppressions = state.decisions.filter(d => istDay.format(Date.parse(d.timestamp)) === day && d.outcome?.startsWith('Suppressed:'))
       .map(d => ({ symbol: d.symbol, timestamp: d.timestamp, cause: d.outcome.slice('Suppressed: '.length) }));
-    return expertEngine.dailyReport(day, dataQuality, { expert: { scores, theses, calls, costUsd: calls.costUsd, coverage: state.assets.filter(a => covered.has(a.symbol)).length, universe: state.assets.length, suppressions } });
+    return expertEngine.dailyReport(day, dataQuality, { expert: { scores, theses, calls, costUsd: calls.costUsd, coverage: state.assets.filter(a => covered.has(a.symbol)).length, universe: state.assets.length, suppressions, calibration: calibration(state.trades) } });
   };
 }
 

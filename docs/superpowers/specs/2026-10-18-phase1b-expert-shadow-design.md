@@ -5,6 +5,7 @@
 - **Goal served:** [GOAL.md](../../GOAL.md) Phase 1b: "model profile runs in shadow; news/evidence capture. Exit bar: shadow proposals beat rules on the same period, after model cost."
 - **Requirements served:** PRD R-017 (domain context), R-018 (decision procedure), R-019 (learning memory), R-020–R-022 (sources, available time, bounded intelligence), R-015 (comparable reports), R-011 (isolated agent permissions).
 - **Owner decisions taken on 18 October 2026:** expert decisions run in a second paper book; the expert may enter, tighten a stop and exit early, never size or widen; Phase 1b runs alongside Phase 1 on the same sessions once the feed is stable; model calls use the owner's Claude Max subscription through the unmodified Claude Code binary, with no API key on the VPS.
+- **Owner decision, 27 October 2026 (paper only):** reversing "never size", the expert's decision now carries a `confidence` (0–1) that scales its risk per trade from 0.25× to 2× of the base, capped at `expert.maxRiskPerTradePct` (default 1%); the cap limits only the scale-up. Every other limit (position, exposure, daily loss, drawdown, tighten-only stops) stays deterministic, and the rules book keeps fixed sizing. Calibration (win rate and average result by confidence bucket) is in the expert daily report.
 
 ## 1. Why this design and not a selector
 

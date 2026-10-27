@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_SETTINGS } from '../src/config.mjs';
-import { SECTOR_INDEX, buildContextPack, makeDecider, makeScoring, reviewClosed, runTheses, scoreDecisions, scorecard, triggerFor, validateDecision, validateThesis } from '../src/expert.mjs';
+import { SECTOR_INDEX, buildContextPack, calibration, makeDecider, makeScoring, reviewClosed, runTheses, scoreDecisions, scorecard, triggerFor, validateDecision, validateThesis } from '../src/expert.mjs';
 import { Store } from '../src/store.mjs';
 import { intelligenceContext } from '../src/intelligence.mjs';
 
@@ -91,7 +91,7 @@ const goodThesis = {
   entryCondition: { type: 'rulesSignal' }, invalidation: { priceBelow: 90, note: 'Gap fill' }, expectedHoldSessions: 2, expiresAt: '2026-10-16T10:00:00.000Z',
   eventAssessment: { novelty: 'new', materiality: 'high', surprise: 'unknown', reaction: 'muted' },
 };
-const goodDecision = { action: 'enter', reason: 'Signal with evidence.', counterEvidence: ['Weak market'], evidenceIds: ['early'], tightenStopTo: null, invalidation: { priceBelow: 95, note: 'Below gap' } };
+const goodDecision = { action: 'enter', reason: 'Signal with evidence.', counterEvidence: ['Weak market'], evidenceIds: ['early'], tightenStopTo: null, invalidation: { priceBelow: 95, note: 'Below gap' }, confidence: 0.6 };
 const deepFreeze = value => { if (value && typeof value === 'object') { Object.values(value).forEach(deepFreeze); Object.freeze(value); } return value; };
 const asOf = dataset.at(-1).timestamp, day = '2026-10-14';
 const buyContext = (claims = [claim('early', '2026-10-14T03:00:00Z')]) => ({ rulesChoice: 'momentum', candidates: [{ strategyId: 'momentum', action: 'BUY' }], intelligence: { claims } });
@@ -160,7 +160,7 @@ test('decider calls once on an entry trigger, records the output and maps the re
   assert.equal(calls[0].model, DEFAULT_SETTINGS.expert.decisionModel); assert.equal(calls[0].maxTurns, 1); assert.equal(calls[0].timeoutMs, 60000);
   assert.equal(calls[0].tools, undefined); assert.equal(typeof calls[0].input, 'string'); assert.match(calls[0].systemPrompt, /abstain/);
   assert.equal(JSON.parse(calls[0].input).trigger, 'entry');
-  assert.deepEqual({ ...result, record: undefined }, { action: 'enter', reason: goodDecision.reason, evidence: ['early: claim early'], counterEvidence: ['Weak market'], tightenStopTo: null, trigger: 'entry', record: undefined });
+  assert.deepEqual({ ...result, record: undefined }, { action: 'enter', reason: goodDecision.reason, evidence: ['early: claim early'], counterEvidence: ['Weak market'], tightenStopTo: null, confidence: 0.6, trigger: 'entry', record: undefined });
   const key = result.record.key, [engine, symbol, trigger, at, hash] = key.split('|');
   assert.deepEqual([engine, symbol, trigger, at], ['expert', 'DEMO1', 'entry', new Date(asOf).toISOString()]); assert.match(hash, /^[0-9a-f]{16}$/);
   assert.deepEqual(result.record.usage, { inputTokens: 10, outputTokens: 5 }); assert.equal(result.record.costUsd, 0.01); assert.equal(result.record.action, 'enter');
@@ -509,4 +509,26 @@ test('makeScoring scores, reviews and writes the expert report with extras', asy
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM model_outputs WHERE trigger='review'").get().n, 1);
   assert.equal(coverage, 1); assert.equal(universe, 2); assert.deepEqual(suppressions.map(s => [s.symbol, s.cause]), [['DEMO2', 'Daily AI call limit reached']]);
   assert.equal(store.memoryFor('DEMO1', '2026-10-14T10:00:00Z').length, 1);
+});
+
+test('validateDecision requires a confidence between 0 and 1', () => {
+  const opts = { evidenceIds: ['early'], position: null, thesis: null };
+  assert.equal(validateDecision(goodDecision, opts).confidence, 0.6);
+  for (const confidence of [1.2, -0.1, NaN]) assert.throws(() => validateDecision({ ...goodDecision, confidence }, opts), /confidence/);
+  const { confidence: _c, ...missing } = goodDecision;
+  assert.throws(() => validateDecision(missing, opts), /confidence/);
+});
+test('calibration buckets closed expert trades by entry confidence', () => {
+  const trades = [
+    { action: 'SELL', strategyId: 'expert', confidence: 0.2, realizedPnl: -100 },
+    { action: 'SELL', strategyId: 'expert', confidence: 0.8, realizedPnl: 300 },
+    { action: 'SELL', strategyId: 'expert', confidence: 0.9, realizedPnl: -50 },
+    { action: 'SELL', strategyId: 'expert', confidence: null, realizedPnl: 10 },
+    { action: 'BUY', strategyId: 'expert', confidence: 0.9, realizedPnl: 0 },
+  ];
+  assert.deepEqual(calibration(trades), [
+    { bucket: 'low (<0.4)', trades: 1, wins: 0, winRate: 0, avgPnl: -100 },
+    { bucket: 'medium (0.4-0.7)', trades: 0, wins: 0, winRate: null, avgPnl: null },
+    { bucket: 'high (>=0.7)', trades: 2, wins: 1, winRate: 0.5, avgPnl: 125 },
+  ]);
 });

@@ -40,10 +40,10 @@ Values the bot uses that only I can set. Defaults are what Phase 1 starts with; 
 
 | Decision | Phase 1 default | Set by |
 |---|---|---|
-| Starting paper capital | ₹9,000 | me, before Phase 1 |
+| Starting paper capital | ₹5,00,000 for both books (from 27 Oct 2026; was ₹9,000). Paper results at this size understate the weight of flat charges on a small real account | me |
 | Universe | 10 liquid NSE stocks priced under ₹1,500/share (so one share is affordable) | me, before Phase 1 |
 | Bar size / horizon | 15-minute closed bars; hold 1–5 sessions; delivery (CNC), long-only | me, before Phase 1 |
-| Risk per trade / max daily loss / max drawdown | 0.5% / 3% / 8% | me, before Phase 1 |
+| Risk per trade / max daily loss / max drawdown | 0.5% / 3% / 8%. Expert book only (27 Oct 2026, paper): the model's confidence scales risk per trade from 0.25× to 2× of 0.5%, never above 1% (`expert.maxRiskPerTradePct`); the daily report's calibration table checks whether its confidence means anything | me |
 | Phase 1 length | 40 trading sessions | me, before Phase 1 |
 | Monthly spend cap (data + VPS + models) | ₹2,500 (raised from ₹1,200 on 18 Oct 2026 for the ₹1,000 AI shadow ceiling; marginal model cost is ₹0 under the subscription) | me |
 | Model access | Claude Max subscription via Claude Code setup-token; no API key | me, 18 October 2026 |

@@ -12,7 +12,7 @@ export const DEFAULT_SETTINGS = {
   barMinutes: 15,
   // shortcut: placeholder allow-list, the owner confirms it before research is enabled.
   expert: { enabled: false, thesisModel: 'claude-opus-5-5', decisionModel: 'claude-opus-5-5', researchModel: 'claude-sonnet-5-5', maxResearchPerSession: 5,
-    allowedDomains: ['nseindia.com', 'bseindia.com', 'rbi.org.in', 'sebi.gov.in', 'reuters.com', 'livemint.com', 'business-standard.com', 'economictimes.indiatimes.com'] },
+    allowedDomains: ['nseindia.com', 'bseindia.com', 'rbi.org.in', 'sebi.gov.in', 'reuters.com', 'livemint.com', 'business-standard.com', 'economictimes.indiatimes.com'] , maxRiskPerTradePct: 1 },
 };
 const DOMAIN = /^[a-z0-9.-]+\.[a-z]{2,}$/, MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const SYMBOL = /^[A-Z0-9][A-Z0-9._&-]{0,24}$/;
@@ -72,6 +72,7 @@ export function validateSettings(input, previous = DEFAULT_SETTINGS) {
   for (const key of ['thesisModel', 'decisionModel', 'researchModel']) if (typeof expert[key] !== 'string' || !MODEL_ID.test(expert[key])) throw new Error(`${key} must be a model id.`);
   if (!Number.isInteger(expert.maxResearchPerSession) || expert.maxResearchPerSession < 0 || expert.maxResearchPerSession > 20) throw new Error('maxResearchPerSession must be between 0 and 20.');
   if (!Array.isArray(expert.allowedDomains) || expert.allowedDomains.length > 50 || expert.allowedDomains.some(domain => typeof domain !== 'string' || !DOMAIN.test(domain))) throw new Error('allowedDomains must list up to 50 lowercase domain names.');
+  if (typeof expert.maxRiskPerTradePct !== 'number' || !Number.isFinite(expert.maxRiskPerTradePct) || expert.maxRiskPerTradePct < 0.1 || expert.maxRiskPerTradePct > 5) throw new Error('maxRiskPerTradePct must be between 0.1 and 5.');
   expert.allowedDomains = [...new Set(expert.allowedDomains)];
   return { version: previous.version + 1, model, strategy, risk, simulation, universe: [...new Set(universe)], barMinutes, expert };
 }

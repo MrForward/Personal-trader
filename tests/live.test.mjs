@@ -387,7 +387,7 @@ test('I1: the 08:45 theses see research captured at 08:31 IST, and a 09:30 decis
   const captured = { ...record, id: 'DEMO1:bbbbbbbbbbbb', firstReceivedAt: '2026-10-14T03:01:00.000Z', analysisReadyAt: '2026-10-14T03:01:00.000Z' };
   const thesis = { stance: 'candidate', thesis: 'Fictional.', mechanism: 'Fictional.', counterEvidence: [], evidenceIds: [captured.id], entryCondition: { type: 'priceAbove', level: 1 },
     invalidation: { priceBelow: 1, note: 'Fictional.' }, expectedHoldSessions: 1, expiresAt: '2026-10-14T10:00:00.000Z', eventAssessment: { novelty: 'a', materiality: 'a', surprise: 'a', reaction: 'a' } };
-  const decision = { action: 'abstain', reason: 'Fictional.', counterEvidence: [], evidenceIds: [], tightenStopTo: null, invalidation: { priceBelow: 1, note: 'Fictional.' } };
+  const decision = { action: 'abstain', reason: 'Fictional.', counterEvidence: [], evidenceIds: [], tightenStopTo: null, invalidation: { priceBelow: 1, note: 'Fictional.' }, confidence: 0.5 };
   const packs = [];
   const modelRunner = async ({ input, schema }) => {
     const { contextPack } = JSON.parse(input); packs.push(contextPack);

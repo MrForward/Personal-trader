@@ -114,12 +114,12 @@
     "createdAt": "2026-10-14T03:15:00.000Z"
   },
   {
-    "key": "expert|DEMO1|entry|2026-10-14T04:15:00.000Z|54bec4edc202140d",
+    "key": "expert|DEMO1|entry|2026-10-14T04:15:00.000Z|4858d808ea4c5d7b",
     "engine": "expert",
     "symbol": "DEMO1",
     "trigger": "entry",
     "asOf": "2026-10-14T04:15:00.000Z",
-    "promptHash": "54bec4edc202140d",
+    "promptHash": "4858d808ea4c5d7b",
     "request": {
       "model": "claude-opus-5-5",
       "trigger": "entry",
@@ -151,7 +151,8 @@
       "invalidation": {
         "priceBelow": 103.5,
         "note": "Fictional invalidation."
-      }
+      },
+      "confidence": 0.6
     },
     "usage": {
       "inputTokens": 1500,
@@ -161,12 +162,12 @@
     "createdAt": "2026-10-14T04:15:00.000Z"
   },
   {
-    "key": "expert|DEMO1|invalidation|2026-10-14T04:30:00.000Z|54bec4edc202140d",
+    "key": "expert|DEMO1|invalidation|2026-10-14T04:30:00.000Z|4858d808ea4c5d7b",
     "engine": "expert",
     "symbol": "DEMO1",
     "trigger": "invalidation",
     "asOf": "2026-10-14T04:30:00.000Z",
-    "promptHash": "54bec4edc202140d",
+    "promptHash": "4858d808ea4c5d7b",
     "request": {
       "model": "claude-opus-5-5",
       "trigger": "invalidation",
@@ -198,7 +199,8 @@
       "invalidation": {
         "priceBelow": 103.5,
         "note": "Fictional invalidation."
-      }
+      },
+      "confidence": 0.6
     },
     "usage": {
       "inputTokens": 1500,
