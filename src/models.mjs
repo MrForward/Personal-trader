@@ -293,7 +293,8 @@ function parseResetAt(text, now = Date.now()) {
 // code.claude.com headless docs; written against CLI 2.1.52; live verification pending.
 export async function runClaudeCode({ model, systemPrompt, input, schema, tools = [], maxTurns = 1, maxBudgetUsd = 0.5, timeoutMs = 60000, binary = 'claude', env = process.env, spawnImpl = spawn }) {
   const args = ['-p', '--output-format', 'json', '--model', model, '--system-prompt', systemPrompt, '--json-schema', JSON.stringify(schema),
-    '--max-turns', String(maxTurns), '--max-budget-usd', String(maxBudgetUsd), '--no-session-persistence',
+    // maxTurns counts the model's own turns; the CLI spends one more to deliver structured_output (with exactly maxTurns it ends at error_max_turns, no output).
+    '--max-turns', String(maxTurns + 1), '--max-budget-usd', String(maxBudgetUsd), '--no-session-persistence',
     // --tools limits the child to the named built-ins (no Read, Glob, Grep or Bash); --allowedTools then applies the domain rules.
     '--tools', [...new Set(tools.map((tool) => tool.replace(/\(.*$/, '')))].join(','), ...(tools.length ? ['--allowedTools', ...tools] : [])];
   // FAKE_CLAUDE_* lets tests steer tests/fixtures/fake-claude.mjs; real runs never set them.

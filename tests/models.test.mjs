@@ -235,10 +235,15 @@ test('claude-code: argv carries flags and child env excludes API keys', async ()
   const v = await ccArgv({ model: 'claude-sonnet-5-5', systemPrompt: 'sys', input: 'in', tools: ['WebSearch', 'WebFetch(domain:nseindia.com)'], maxTurns: 3,
     env: { FAKE_CLAUDE_MODE: 'argv', PATH: process.env.PATH, ANTHROPIC_API_KEY: 'leak', CLAUDE_CODE_OAUTH_TOKEN: 'tok', HOME: '/tmp' } });
   const a = v.argv.join(' ');
-  for (const flag of ['-p', '--output-format json', '--json-schema', '--model claude-sonnet-5-5', '--max-turns 3', '--max-budget-usd 0.5', '--allowedTools WebSearch WebFetch(domain:nseindia.com)', '--system-prompt sys', '--no-session-persistence']) assert.ok(a.includes(flag), flag);
+  for (const flag of ['-p', '--output-format json', '--json-schema', '--model claude-sonnet-5-5', '--max-turns 4', '--max-budget-usd 0.5', '--allowedTools WebSearch WebFetch(domain:nseindia.com)', '--system-prompt sys', '--no-session-persistence']) assert.ok(a.includes(flag), flag);
   // Only the named built-ins exist in the child; the domain rules then narrow WebFetch.
   assert.equal(v.argv[v.argv.indexOf('--tools') + 1], 'WebSearch,WebFetch');
   assert.ok(!v.env.includes('ANTHROPIC_API_KEY')); assert.ok(v.env.includes('CLAUDE_CODE_OAUTH_TOKEN')); assert.equal(v.stdin, 'in');
+});
+test('claude-code: --max-turns adds the structured-output turn to the caller\'s model turns', async () => {
+  // The CLI returns structured_output in an extra turn; with --max-turns 1 it stops at error_max_turns and returns none (seen live, 27 Oct 2026).
+  const { argv } = await ccArgv({ maxTurns: 1 });
+  assert.equal(argv[argv.indexOf('--max-turns') + 1], '2');
 });
 test('claude-code: no tools passes --tools ""', async () => {
   const { argv } = await ccArgv();
