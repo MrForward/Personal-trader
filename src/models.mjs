@@ -291,7 +291,7 @@ function parseResetAt(text, now = Date.now()) {
 
 // Field names `structured_output`, `usage.input_tokens`, `usage.output_tokens`, `total_cost_usd` per
 // code.claude.com headless docs; written against CLI 2.1.52; live verification pending.
-export async function runClaudeCode({ model, systemPrompt, input, schema, tools = [], maxTurns = 1, maxBudgetUsd = 0.5, timeoutMs = 60000, binary = 'claude', env = process.env, spawnImpl = spawn }) {
+export async function runClaudeCode({ model, systemPrompt, input, schema, tools = [], maxTurns = 1, maxBudgetUsd = 0.5, timeoutMs = 60000, binary = 'claude', env = process.env, spawnImpl = spawn, signal }) {
   const args = ['-p', '--output-format', 'json', '--model', model, '--system-prompt', systemPrompt, '--json-schema', JSON.stringify(schema),
     // maxTurns counts the model's own turns; the CLI spends one more to deliver structured_output (with exactly maxTurns it ends at error_max_turns, no output).
     '--max-turns', String(maxTurns + 1), '--max-budget-usd', String(maxBudgetUsd), '--no-session-persistence',
@@ -300,12 +300,16 @@ export async function runClaudeCode({ model, systemPrompt, input, schema, tools 
   // FAKE_CLAUDE_* lets tests steer tests/fixtures/fake-claude.mjs; real runs never set them.
   const picked = Object.fromEntries(Object.entries(env).filter(([k]) => ['PATH', 'HOME', 'LANG', 'CLAUDE_CODE_OAUTH_TOKEN'].includes(k) || k.startsWith('FAKE_CLAUDE_')));
   // A fresh empty working directory per call, so the child can see no project or home files.
+  const aborted = () => modelError('MODEL_EXIT', 'claude -p aborted: shutting down.');
+  if (signal?.aborted) throw aborted();
   const cwd = mkdtempSync(join(tmpdir(), 'claude-run-'));
   const { stdout, stderr, code } = await new Promise((resolve, reject) => {
     const child = spawnImpl(binary, args, { env: picked, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '', err = '', done = false;
-    const finish = (fn, v) => { if (!done) { done = true; clearTimeout(timer); fn(v); } };
+    const onAbort = () => { child.kill('SIGKILL'); finish(reject, aborted()); };
+    const finish = (fn, v) => { if (!done) { done = true; clearTimeout(timer); signal?.removeEventListener('abort', onAbort); fn(v); } };
     const timer = setTimeout(() => { child.kill('SIGKILL'); finish(reject, modelError('MODEL_TIMEOUT', 'claude -p timed out.')); }, timeoutMs);
+    signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', (d) => { if (out.length < 2e6) out += d; });
     child.stderr.on('data', (d) => { if (err.length < 2e4) err += d; });
     child.on('error', (e) => finish(reject, modelError('MODEL_EXIT', `claude -p could not start: ${e.message}`)));

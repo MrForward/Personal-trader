@@ -53,6 +53,11 @@ export function createApplication({
   if (!loopbackNames.has(host)) throw new Error('The personal dashboard must bind to loopback. Use an SSH tunnel for remote access.');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid listening port.');
   const store = new Store(dbPath);
+  let closing = false;
+  // close() aborts every in-flight claude -p child through this signal.
+  const aborter = new AbortController();
+  const runModel = input => modelRunner({ ...input, signal: aborter.signal });
+  const shuttingDown = () => { if (closing) throw new Error('The workspace is shutting down.'); };
   let engine;
   let fixtureDataset;
   let fixtureRecords = [];
@@ -80,11 +85,11 @@ export function createApplication({
   // Both books share every setting (spec §2); the expert engine keeps its own version counter.
   const withoutVersion = ({ version: _version, ...rest }) => rest;
   if (expertOn) {
-    expertStore = new Store(expertDbPath);
+    try { expertStore = new Store(expertDbPath); } catch (error) { store.close(); throw error; }
     const expertIntelligence = ({ symbol, asOf }) => intelligenceContext({ records: expertEngine?.state.intelligenceRecords ?? [], symbol, asOf });
     // Read through to the expert engine so settings changes reach the decider without a restart.
     const expertSettings = { get model() { return expertEngine.state.settings.model; }, get expert() { return expertEngine.state.settings.expert; } };
-    const decider = makeDecider({ store: expertStore, settings: expertSettings, runner: modelRunner, marketFor: asOf => expertIntelligence({ symbol: 'MARKET', asOf }) });
+    const decider = makeDecider({ store: expertStore, settings: expertSettings, runner: runModel, marketFor: asOf => expertIntelligence({ symbol: 'MARKET', asOf }) });
     expertEngine = new TradingEngine(expertStore, { decider, intelligenceProvider: expertIntelligence });
     const canonical = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort()) : item);
     if (canonical(withoutVersion(expertEngine.state.settings)) !== canonical(withoutVersion(engine.state.settings))) {
@@ -92,17 +97,18 @@ export function createApplication({
       catch (error) { process.stderr.write(`Warning: expert settings not synced with the rules book: ${publicError(error)}\n`); }
     }
     const research = async ({ symbol, now }) => {
+      shuttingDown();
       const settings = expertEngine.state.settings;
       const id = expertStore.reserveCall({ provider: 'claude-code', model: settings.expert.researchModel, dailyCallLimit: settings.model.dailyCallLimit });
       let out;
-      try { out = symbol === 'MARKET' ? await researchMarket({ now, settings, runner: modelRunner }) : await researchSymbol({ symbol, companyName: symbol, now, settings, runner: modelRunner }); }
+      try { out = symbol === 'MARKET' ? await researchMarket({ now, settings, runner: runModel }) : await researchSymbol({ symbol, companyName: symbol, now, settings, runner: runModel }); }
       catch (error) { expertStore.finishCall(id, 'failed'); throw error; }
       expertStore.finishCall(id, 'completed', out.usage);
       return out;
     };
-    const theses = ({ symbols, day, asOf, state }) => runTheses({ store: expertStore, settings: expertEngine.state.settings, symbols, day, asOf, state, runner: modelRunner,
-      intelligenceFor: (symbol, at) => expertIntelligence({ symbol, asOf: at }) });
-    const scoring = makeScoring({ expertEngine, rulesEngine: engine, runner: modelRunner });
+    const theses = ({ symbols, day, asOf, state }) => (shuttingDown(), runTheses({ store: expertStore, settings: expertEngine.state.settings, symbols, day, asOf, state, runner: runModel,
+      intelligenceFor: (symbol, at) => expertIntelligence({ symbol, asOf: at }) }));
+    const scoring = makeScoring({ expertEngine, rulesEngine: engine, runner: runModel });
     expertBook = { engine: expertEngine, decider, research, theses, scoring };
   }
   // One writer: requests and replay ticks cannot race settings, state or the cursor.
@@ -112,7 +118,7 @@ export function createApplication({
     queue = result.catch(() => {});
     return result;
   };
-  let app;
+  let app, closed;
   const kiteSession = kite?.apiKey ? new KiteSession({ apiKey: kite.apiKey, apiSecret: kite.apiSecret, store, universe: () => engine.state.settings.universe,
     ...(makeClient ? { makeClient } : {}), ...(makeTicker ? { makeTicker } : {}) }) : null;
   const runner = kiteSession ? new LiveRunner({ engine, session: kiteSession, run: serial,
@@ -145,7 +151,6 @@ export function createApplication({
     }
     return store.dailyReports().map(rules => ({ day: rules.day, rules, expert: expertByDay.get(rules.day) ?? null }));
   };
-  let closing = false;
   const json = (res, status, value) => {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
     res.end(JSON.stringify(value));
@@ -253,14 +258,22 @@ export function createApplication({
         resolveListen(server.address());
       });
     }),
-    async close() {
-      if (closing) return;
-      closing = true;
-      runner?.stop();
-      if (interval) clearInterval(interval);
-      if (server.listening) await new Promise(resolveClose => server.close(resolveClose));
-      await queue;
-      store.close(); expertStore?.close();
+    // Stops every source of work, aborts claude -p children, lets queued work drain for up to timeoutMs, then closes both stores.
+    // Once a store is closed every write to it throws, so a straggler past the timeout cannot touch the ledger.
+    close({ timeoutMs = 10_000 } = {}) {
+      return closed ??= (async () => {
+        closing = true;
+        runner?.stop();
+        if (interval) clearInterval(interval);
+        aborter.abort();
+        const drained = Promise.allSettled([server.listening && new Promise(resolveClose => server.close(resolveClose)), queue, runner?.idle()]);
+        server.closeIdleConnections();
+        let timer;
+        const timedOut = await Promise.race([drained.then(() => false), new Promise(resolveTimeout => { timer = setTimeout(resolveTimeout, timeoutMs, true); })]);
+        clearTimeout(timer);
+        if (timedOut) { server.closeAllConnections(); process.stderr.write(`Shutdown timed out after ${timeoutMs} ms; closing storage with work still pending.\n`); }
+        try { store.close(); } finally { expertStore?.close(); }
+      })();
     },
   };
   return app;
@@ -276,5 +289,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const address = await app.listen();
   process.stdout.write(`Trading Lab paper workspace: http://${address.address}:${address.port}\n`);
   process.stdout.write('Simulated orders only; captured intelligence, no live news or broker connection.\n');
-  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { void app.close().then(() => process.exit(0)); });
+  // A second signal falls through to the default handler and kills the process at once.
+  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { void app.close().then(() => process.exit(0), error => { process.stderr.write(`Shutdown failed: ${redact(error.message)}\n`); process.exit(1); }); });
 }

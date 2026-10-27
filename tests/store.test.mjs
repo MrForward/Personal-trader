@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.mjs';
@@ -32,8 +33,9 @@ test('reservation audit failure rolls back the call without consuming budget', t
 });
 test('separate connections enforce shared call budget and reject stale state writers', t => {
   const directory = mkdtempSync(join(tmpdir(), 'trading-lab-store-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const a = new Store(join(directory, 'state.sqlite')), b = new Store(join(directory, 'state.sqlite'));
-  t.after(() => { a.close(); b.close(); });
+  // b is a raw second connection (as from outside the app); the single-instance lock refuses a second Store.
+  const a = new Store(join(directory, 'state.sqlite')), b = Object.assign(Object.create(Store.prototype), { db: new DatabaseSync(join(directory, 'state.sqlite')), revision: 0 });
+  t.after(() => { a.close(); b.db.close(); });
   a.save({ cursor: 29 }); a.reserveCall(call); assert.throws(() => b.reserveCall(call), /Daily AI call limit/);
   assert.throws(() => b.save({ cursor: 99 }), /another process/); assert.equal(a.load().cursor, 29);
 });
@@ -71,4 +73,18 @@ test('lastDecision returns the newest decision output before a time, skipping th
   assert.equal(s.lastDecision('INFY').key, 'b'); // suppressions are not decisions
   assert.deepEqual(s.decisionTriggers('INFY', '2026-10-15T00:00:00.000Z', '2026-10-16T00:00:00.000Z'), ['stale-review']);
   assert.deepEqual(s.decisionTriggers('INFY', '2026-10-14T00:00:00.000Z', '2026-10-15T04:00:00.000Z'), ['entry']);
+});
+
+test('a second Store on the same path is refused while the first is open, and allowed after close', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'trading-lab-lock-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, 'state.sqlite'), first = new Store(path);
+  assert.throws(() => new Store(path), error => error.code === 'DB_LOCKED' && /already open in process \d+/.test(error.message));
+  first.close(); assert.equal(existsSync(`${path}.lock`), false);
+  new Store(path).close();
+});
+test('a lock left by a dead process is taken over', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'trading-lab-lock-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, 'state.sqlite');
+  writeFileSync(`${path}.lock`, '2147483646');
+  new Store(path).close();
 });

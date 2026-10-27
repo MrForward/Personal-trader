@@ -262,3 +262,31 @@ test('POST /api/settings accepts expert settings; the page ships the Expert pane
   for (const id of ['expert-panel', 'expert-enabled', 'expert-thesis-model', 'expert-decision-model', 'expert-research-model', 'expert-max-research', 'expert-domains']) assert.match(html, new RegExp(`id="${id}"`));
   assert.match(html, /next service restart/); assert.match(script, /function renderExpert/);
 });
+
+test('close() aborts a hanging claude call, finishes within its timeout and writes nothing after it starts', async t => {
+  const { dbPath } = seededDb(t);
+  let signal, settle;
+  // Hangs and ignores the abort, like a child that will not die.
+  const modelRunner = input => { signal = input.signal; return new Promise(resolve => { settle = resolve; }); };
+  const app = createApplication({ dbPath, port: 0, autoStepMs: 0, kite: { apiKey: 'key', apiSecret: 'kite-api-secret' }, modelRunner,
+    makeClient: () => fakeClient(), makeTicker: () => fakeTicker(), liveOptions: { intervalMs: 0, calendar: () => null } });
+  await app.listen();
+  // Queued the way an anomaly scan queues it, so close() has to wait on it.
+  const research = app.runner.expertTask = app.runner.research(['INFY']);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(signal && !signal.aborted);
+  const expertDb = dbPath.replace(/\.sqlite$/, '-expert.sqlite'), before = [app.store.audit().length, app.expertStore.audit().length];
+  const started = Date.now();
+  const logged = [], write = process.stderr.write;
+  process.stderr.write = chunk => { logged.push(String(chunk)); return true; };
+  try {
+    await app.close({ timeoutMs: 200 });
+    assert.ok(Date.now() - started < 1500); assert.equal(signal.aborted, true);
+    // The call answers after shutdown; nothing may reach either database.
+    settle({ value: { records: [], coverageNote: 'late' }, usage: { inputTokens: 1, outputTokens: 1 }, costUsd: 0 });
+    await research;
+  } finally { process.stderr.write = write; }
+  assert.match(logged.join(''), /Shutdown timed out/);
+  const rules = new Store(dbPath), expert = new Store(expertDb);
+  try { assert.deepEqual([rules.audit().length, expert.audit().length], before); } finally { rules.close(); expert.close(); }
+});

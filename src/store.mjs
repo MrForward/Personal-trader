@@ -1,14 +1,31 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 const DECISIONS = "symbol=? AND trigger NOT IN ('thesis','review') AND json_extract(response,'$.suppressed') IS NULL";
 const outputRow = row => row ? { ...row, request: JSON.parse(row.request), response: JSON.parse(row.response), usage: JSON.parse(row.usage) } : null;
 function failure(message, code = 'PERSISTENCE_ERROR') { const error = new Error(message); error.code = code; return error; }
 
+const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; } };
+// One writer per database: a lock file beside it holds the owner's PID. A lock whose PID is gone (crash, kill -9) is taken over.
+// shortcut: a recycled PID makes a stale lock look live; delete the .lock file by hand if so.
+function lock(path) {
+  const file = `${path}.lock`;
+  for (;;) {
+    try { writeFileSync(file, String(process.pid), { flag: 'wx', mode: 0o600 }); return file; } catch (error) { if (error.code !== 'EEXIST') throw error; }
+    let pid;
+    try { pid = Number(readFileSync(file, 'utf8')); } catch { continue; }
+    if (pid !== process.pid && !alive(pid)) { rmSync(file, { force: true }); continue; }
+    throw failure(`${path} is already open in process ${pid}. Stop that process before starting another; two writers would corrupt the ledger.`, 'DB_LOCKED');
+  }
+}
+
 export class Store {
   constructor(path) {
-    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    if (path !== ':memory:') { mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); this.lockFile = lock(path); }
+    try { this.open(path); } catch (error) { this.releaseLock(); throw error; }
+  }
+  open(path) {
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0);
@@ -146,5 +163,6 @@ export class Store {
   clearKiteSession() { this.db.prepare('DELETE FROM kite_session WHERE id=1').run(); }
   audit() { return this.db.prepare('SELECT * FROM audit ORDER BY id').all().map(row => ({ ...row, payload: JSON.parse(row.payload) })); }
   archiveCount() { return this.db.prepare('SELECT COUNT(*) AS count FROM archived_runs').get().count; }
-  close() { this.db.close(); }
+  close() { try { this.db.close(); } finally { this.releaseLock(); } }
+  releaseLock() { if (this.lockFile) rmSync(this.lockFile, { force: true }); this.lockFile = null; }
 }

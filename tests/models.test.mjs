@@ -268,6 +268,14 @@ test('claude-code: timeout kills the child', async () => {
   await assert.rejects(ccRun('hang', { timeoutMs: 200 }), (e) => e.code === 'MODEL_TIMEOUT');
   assert.ok(Date.now() - started < 1000);
 });
+test('claude-code: abort kills the child at once, and an aborted signal never spawns', async () => {
+  const controller = new AbortController(), started = Date.now();
+  setTimeout(() => controller.abort(), 100);
+  await assert.rejects(ccRun('hang', { timeoutMs: 10_000, signal: controller.signal }), (e) => e.code === 'MODEL_EXIT' && /aborted/.test(e.message));
+  assert.ok(Date.now() - started < 1000);
+  let spawned = false;
+  await assert.rejects(ccRun('ok', { signal: controller.signal, spawnImpl: () => { spawned = true; } }), /aborted/); assert.equal(spawned, false);
+});
 test('claude-code: other non-zero exit is MODEL_EXIT', async () => {
   await assert.rejects(ccRun('nope'), (e) => e.code === 'MODEL_EXIT');
 });
