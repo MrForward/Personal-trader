@@ -8,6 +8,7 @@ import { analyzeMarket, WARMUP_BARS } from './strategies.mjs';
 const SYSTEM_PROMPT = readFileSync(new URL('./prompts/research.md', import.meta.url), 'utf8');
 const WINDOW = 'last 7 days plus scheduled events in the next 14 days';
 const SESSION_MINUTES = 375; // NSE 09:15-15:30
+const LOOKBACK_MS = 7 * 86_400_000; // the WINDOW's "last 7 days"
 
 const schemaFor = kinds => ({
   type: 'object', additionalProperties: false, required: ['records', 'coverageNote'],
@@ -37,7 +38,8 @@ async function collect({ symbol, extra, now, settings, schema, runner }) {
   const out = await runner({
     // Live run (27 Oct 2026): 3 turns ran out mid-search (error_max_turns, no output); a search, a few fetches and the answer need ~8.
     model: researchModel, systemPrompt: SYSTEM_PROMPT, schema, maxTurns: 8, timeoutMs: 120000,
-    tools: ['WebSearch', ...allowedDomains.map(d => `WebFetch(domain:${d})`)],
+    // A bare domain rule covers only that exact host, so www. and archive subdomains need the wildcard too.
+    tools: ['WebSearch', ...allowedDomains.flatMap(d => [`WebFetch(domain:${d})`, `WebFetch(domain:*.${d})`])],
     input: JSON.stringify({ symbol, ...extra, nowIst: istString(nowMs), allowedDomains, window: WINDOW }),
   });
   // Stamped when the evidence actually arrived: a research call can run for minutes.
@@ -49,6 +51,8 @@ async function collect({ symbol, extra, now, settings, schema, runner }) {
     // One bad record (future publishedAt, status clash, duplicate id, off-list host) must not discard the batch.
     try {
       if (!onList(r.sourceUrl, allowedDomains)) throw new Error('off-list');
+      // The model returned 12-day-old stories in the 27 Oct probe; a future scheduled event keeps an older notice.
+      if (Date.parse(r.publishedAt) < nowMs - LOOKBACK_MS && !(Date.parse(r.eventAt) >= nowMs)) throw new Error('outside window');
       validateIntelligence([...accepted, candidate]);
       accepted.push(candidate);
     } catch { dropped++; }

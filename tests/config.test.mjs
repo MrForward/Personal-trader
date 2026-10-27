@@ -40,7 +40,9 @@ test('fixed monthly costs and spend cap are validated', () => {
 });
 test('expert settings default off and validate', () => {
   assert.equal(validateSettings({}).expert.enabled, false);
-  assert.equal(DEFAULT_SETTINGS.expert.allowedDomains.length, 8);
+  // Probe 27 Oct 2026: WebSearch rejects the whole call when allowed_domains names a site that blocks Anthropic's crawler.
+  for (const blocked of ['reuters.com', 'livemint.com', 'economictimes.indiatimes.com', 'moneycontrol.com']) assert.ok(!DEFAULT_SETTINGS.expert.allowedDomains.includes(blocked), blocked);
+  for (const reachable of ['nseindia.com', 'bseindia.com', 'business-standard.com', 'businesstoday.in']) assert.ok(DEFAULT_SETTINGS.expert.allowedDomains.includes(reachable), reachable);
   assert.equal(DEFAULT_SETTINGS.model.dailyCallLimit, 60);
   assert.throws(() => validateSettings({ expert: { enabled: 'yes' } }));
   assert.throws(() => validateSettings({ expert: { allowedDomains: ['http://x'] } }));

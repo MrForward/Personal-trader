@@ -40,13 +40,22 @@ test('a publishedAt after now is dropped while a good record survives', async ()
   assert.deepEqual([r.records.length, r.dropped], [1, 1]); assert.equal(r.records[0].origin, 'Infosys results');
 });
 
+test('records older than the 7-day window are dropped unless their event is still ahead', async () => {
+  const r = await run([
+    rec('https://www.nseindia.com/old', { origin: 'Old story', publishedAt: '2026-10-11T00:00:00+05:30' }),
+    rec('https://www.nseindia.com/cal', { origin: 'Board meeting notice', publishedAt: '2026-10-07T00:00:00+05:30', eventAt: '2026-11-03T00:00:00+05:30', sourceKind: 'calendar' }),
+    rec('https://www.nseindia.com/edge', { origin: 'Edge', publishedAt: '2026-10-12T08:30:00+05:30' }),
+  ]);
+  assert.deepEqual(r.records.map(x => x.origin).sort(), ['Board meeting notice', 'Edge']); assert.equal(r.dropped, 1);
+});
+
 test('a status disagreement with an earlier copy drops only that record', async () => {
-  const r = await run([rec('https://www.nseindia.com/a'), rec('https://www.reuters.com/b', { publishedAt: '2026-10-18T11:00:00+05:30', verificationStatus: 'reported', sourceKind: 'news' })]);
+  const r = await run([rec('https://www.nseindia.com/a'), rec('https://www.business-standard.com/b', { publishedAt: '2026-10-18T11:00:00+05:30', verificationStatus: 'reported', sourceKind: 'news' })]);
   assert.deepEqual([r.records.length, r.dropped], [1, 1]);
 });
 
 test('same origin twice yields two records that intelligenceContext merges to one claim with earliest publishedAt', async () => {
-  const r = await run([rec('https://www.nseindia.com/a', { publishedAt: '2026-10-18T12:00:00+05:30' }), rec('https://www.reuters.com/b', { publishedAt: '2026-10-18T10:00:00+05:30', sourceKind: 'news' })]);
+  const r = await run([rec('https://www.nseindia.com/a', { publishedAt: '2026-10-18T12:00:00+05:30' }), rec('https://www.business-standard.com/b', { publishedAt: '2026-10-18T10:00:00+05:30', sourceKind: 'news' })]);
   assert.equal(r.records.length, 2);
   const ctx = intelligenceContext({ records: r.records, symbol: 'INFY', asOf: NOW });
   assert.equal(ctx.claims.length, 1); assert.equal(ctx.claims[0].publishedAt, '2026-10-18T04:30:00.000Z');
@@ -55,12 +64,23 @@ test('same origin twice yields two records that intelligenceContext merges to on
 test('runner receives WebFetch domain rules and no portfolio fields', async () => {
   const seen = []; await run([], { runner: fakeRunner({ records: [], coverageNote: 'none' }, seen) });
   const a = seen[0];
-  assert.ok(a.tools.includes('WebSearch') && a.tools.includes('WebFetch(domain:nseindia.com)'));
+  // A bare domain rule matches only that host: WebFetch of www.business-standard.com was denied in the 27 Oct probe.
+  for (const t of ['WebSearch', 'WebFetch(domain:nseindia.com)', 'WebFetch(domain:*.nseindia.com)']) assert.ok(a.tools.includes(t), t);
   assert.deepEqual([a.model, a.maxTurns, a.timeoutMs, a.schema], ['claude-sonnet-5-5', 8, 120000, RESEARCH_SCHEMA]);
   assert.match(a.systemPrompt, /evidence/i);
   const input = JSON.parse(a.input);
   assert.deepEqual([input.symbol, input.companyName], ['INFY', 'Infosys']); assert.match(input.nowIst, /\+05:30$/);
   assert.ok(!/cash|equity|position/i.test(a.input));
+});
+
+test('prompt retries WebSearch without unreachable domains, fetches pages for dates, and pins date-only sources to IST midnight', async () => {
+  const seen = []; await run([], { runner: fakeRunner({ records: [], coverageNote: 'none' }, seen) });
+  const prompt = seen[0].systemPrompt;
+  assert.match(prompt, /repeat it at once without exactly those domains/);
+  assert.match(prompt, /WebFetch/);
+  assert.match(prompt, /page not fetched/);
+  assert.match(prompt, /T00:00:00\+05:30/);
+  assert.doesNotMatch(prompt, /If the source states no publication time, omit the record/);
 });
 
 test('researchMarket tags MARKET, sends no company name, applies the allow-list', async () => {
